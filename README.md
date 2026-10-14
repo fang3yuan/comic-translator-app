@@ -43,7 +43,9 @@
 
 ## ⚡ ابدأ
 
-**الأسهل (من Release):** نزّل `ComicTranslator-windows.zip` من صفحة Releases، فكّه، وشغّل `ComicTranslator.exe`.
+**الأسهل (ويندوز):** من صفحة [Releases](https://github.com/fang3yuan/comic-translator-app/releases/latest) نزّل **`ComicTranslator-Setup.exe`** وشغّله: يثبّت البرنامج ويضع اختصارًا على سطح المكتب. لا يحتاج بايثون.
+
+**بديل:** نزّل المشروع (Code ▸ Download ZIP) وانقر **`Install.bat`**: يحمّل آخر إصدار ويثبّته تلقائيًا.
 
 **من الكود:**
 

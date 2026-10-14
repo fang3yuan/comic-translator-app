@@ -1,7 +1,7 @@
 # 🛠️ التثبيت
 
 ## الطريقة الأسهل: ملف جاهز (بدون بايثون)
-من صفحة **Releases** في GitHub نزّل `ComicTranslator-windows.zip`، فكّه وشغّل `ComicTranslator.exe`. ثم افتح **Setup / Install** لتنزيل نموذج LaMa (اختياري)، وانتقل إلى [مفاتيح جمناي](GEMINI.md). لبناء الملف بنفسك: [BUILD.md](BUILD.md).
+من [Releases](https://github.com/fang3yuan/comic-translator-app/releases/latest) نزّل `ComicTranslator-Setup.exe` وشغّله (أو انقر `Install.bat` من المشروع). ثم افتح **Setup / Install** لتنزيل نموذج LaMa (اختياري)، وانتقل إلى [مفاتيح جمناي](GEMINI.md). لبناء الملف بنفسك: [BUILD.md](BUILD.md).
 
 ## أو التشغيل من الكود
 

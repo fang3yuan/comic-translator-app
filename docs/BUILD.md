@@ -19,7 +19,7 @@
 ```bash
 git init && git add . && git commit -m "Comic Translator"
 git branch -M main
-git remote add origin https://github.com/USER/REPO.git
+git remote add origin https://github.com/fang3yuan/comic-translator-app.git
 git push -u origin main
 ```
 عند كل push يعمل ملف `.github/workflows/build.yml`: يشغّل الاختبارات ثم يبني الثلاثة أنظمة ويحفظ الملفات في **Actions ▸ Artifacts**.
@@ -33,3 +33,8 @@ git tag v2.0.0 && git push origin v2.0.0
 ## ملاحظات
 - المتغير `COMIC_TRANSLATOR_HOME` يغيّر مكان الإعدادات والنماذج والخطوط. افتراضيًا بجانب البرنامج، وإن لم تُسمح الكتابة فـ `~/ComicTranslator`.
 - ماك: قد يطلب النظام السماح بتشغيل تطبيق غير موقّع (Right-click ▸ Open).
+
+## المثبّت (Setup.exe) و Install.bat
+- `packaging/installer.iss` (Inno Setup): يبني `ComicTranslator-Setup.exe` تلقائيًا في GitHub Actions ويرفعه مع الـRelease. يثبّت في `%LOCALAPPDATA%\ComicTranslator` بدون صلاحيات مدير ويضيف اختصارًا.
+- `Install.bat` + `packaging/install.ps1`: يحمّل آخر Release من `fang3yuan/comic-translator-app` ويثبّته. التحديث = تشغيله مرة ثانية (يحتفظ بالإعدادات والنماذج).
+- **يعملان فقط بعد وجود Release أول** (ادفع الكود ثم الوسم `v2.0.0`).
