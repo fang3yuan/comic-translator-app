@@ -1,0 +1,101 @@
+{
+  "version": 5,
+  "general": {
+    "theme": "dark",
+    "reading_order": "rtl",
+    "output_format": "png",
+    "jpg_quality": 95,
+    "save_project_json": true,
+    "first_run_done": false
+  },
+  "detector": {
+    "mask_dilate": 3
+  },
+  "ocr": {
+    "min_confidence": 0.25,
+    "tile_height": 1500,
+    "max_side": 1280
+  },
+  "inpainting": {
+    "backend": "auto",
+    "lama_model": "models/lama_fp32.onnx",
+    "fallback": "telea",
+    "radius": 5,
+    "flat_fill": true
+  },
+  "translation": {
+    "gemini_keys": [],
+    "model": "gemini-3.5-flash-lite",
+    "notes": "",
+    "retries": 3,
+    "min_interval": 1.0,
+    "timeout": 90,
+    "concise": true,
+    "arabic_digits": false,
+    "erase_credits": true,
+    "on_failure": "raise"
+  },
+  "fonts": {
+    "default_font": "fonts/default_arabic.ttf",
+    "mappings": {
+      "dialogue": "",
+      "narration": "",
+      "sfx": "",
+      "whisper": ""
+    }
+  },
+  "styles": {
+    "dialogue": {
+      "color": "#000000",
+      "match_source_color": true,
+      "stroke_enabled": false,
+      "stroke_color": "#FFFFFF",
+      "stroke_auto": true,
+      "stroke_width": 2,
+      "shadow_enabled": false,
+      "shadow_color": "#000000",
+      "shadow_offset": 2,
+      "opacity": 1.0,
+      "max_font_ratio": 1.4
+    },
+    "narration": {
+      "color": "#000000",
+      "match_source_color": true,
+      "stroke_enabled": false,
+      "stroke_color": "#FFFFFF",
+      "stroke_auto": true,
+      "stroke_width": 2,
+      "shadow_enabled": false,
+      "shadow_color": "#000000",
+      "shadow_offset": 2,
+      "opacity": 1.0,
+      "max_font_ratio": 1.2
+    },
+    "sfx": {
+      "color": "#000000",
+      "match_source_color": true,
+      "stroke_enabled": true,
+      "stroke_color": "#FFFFFF",
+      "stroke_auto": true,
+      "stroke_width": 3,
+      "shadow_enabled": false,
+      "shadow_color": "#000000",
+      "shadow_offset": 2,
+      "opacity": 1.0,
+      "max_font_ratio": 3.0
+    },
+    "whisper": {
+      "color": "#000000",
+      "match_source_color": true,
+      "stroke_enabled": false,
+      "stroke_color": "#FFFFFF",
+      "stroke_auto": true,
+      "stroke_width": 2,
+      "shadow_enabled": false,
+      "shadow_color": "#000000",
+      "shadow_offset": 2,
+      "opacity": 1.0,
+      "max_font_ratio": 1.2
+    }
+  }
+}

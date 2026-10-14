@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "comic-translator-gui"
+version = "2.0.0"
+description = "Local manga/comic OCR, inpainting, translation and Arabic typesetting desktop app"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "customtkinter>=5.2.2",
+    "Pillow>=10.0.0",
+    "numpy>=1.24",
+    "opencv-python-headless>=4.8.0",
+    "arabic-reshaper>=3.0.0",
+    "python-bidi>=0.4.2",
+    "requests>=2.31.0",
+    "onnxruntime>=1.16.0",
+    "rapidocr>=3.0.0",
+    "tkinterdnd2>=0.3.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.4.0"]
+
+[project.scripts]
+comic-translator = "src.main:main"
+
+[project.gui-scripts]
+comic-translator-gui = "src.main:main"
+
+[tool.setuptools.packages.find]
+include = ["src*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

@@ -1,0 +1,12 @@
+# Minimal set - installs in a few minutes, no PyTorch needed.
+customtkinter>=5.2.2
+Pillow>=10.0.0
+numpy>=1.24
+opencv-python-headless>=4.8.0
+arabic-reshaper>=3.0.0
+python-bidi>=0.4.2
+requests>=2.31.0
+onnxruntime>=1.16.0          # runs OCR and the LaMa eraser (use onnxruntime-gpu for NVIDIA GPUs)
+rapidocr>=3.0.0              # text reader (models are bundled in the package)
+tkinterdnd2>=0.3.0           # drag & drop (optional but recommended)
+
