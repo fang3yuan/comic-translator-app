@@ -5,7 +5,8 @@ from __future__ import annotations
 import importlib.util
 import logging
 import re
-from typing import Any, Callable, List, Optional, Sequence
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any, Callable, List, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
@@ -13,7 +14,7 @@ import numpy as np
 from src.core.models import OCRLine, SourceStyle, TextRegion
 from src.utils.color_utils import analyze_text_pixels, contrast_color
 from src.utils.image_utils import bbox_iou
-from src.utils.sysutils import worker_threads
+from src.utils.sysutils import pool_workers, worker_threads
 
 logger = logging.getLogger(__name__)
 
@@ -113,6 +114,7 @@ class OCREngine:
         tile_height: int = 1500,
         log: Optional[Callable[[str], None]] = None,
         max_side: int = 1280,
+        workers: int = 0,
     ) -> None:
         """Create the engine (the model loads on first use).
 
@@ -122,7 +124,9 @@ class OCREngine:
             log: Optional logging callback.
             max_side: The text finder works on a copy whose long side is at most this many
                 pixels (big speed-up on large scans; text is still found at this size).
+            workers: Threads used to read the found lines (``0`` = automatic, a few at most).
         """
+        self.workers = pool_workers(workers)
         self.max_side = max(640, int(max_side))
         self.min_confidence = min_confidence
         self.tile_height = max(600, tile_height)
@@ -154,22 +158,99 @@ class OCREngine:
             "EngineConfig.onnxruntime.inter_op_num_threads": 1,
         })
 
-    def _read_once(self, image_bgr: np.ndarray) -> List[OCRLine]:
-        """Run OCR on one image (no tiling)."""
+    # -- step 1: where is the text? (no reading yet) -----------------------
+    def _detect_once(self, image_bgr: np.ndarray) -> List[np.ndarray]:
+        """Find text-line polygons in one image without recognising them."""
         self._load()
-        out = self._reader(image_bgr)
-        if out is None or getattr(out, "boxes", None) is None:
+        out = self._reader(image_bgr, use_det=True, use_cls=False, use_rec=False)
+        boxes = getattr(out, "boxes", None)
+        if boxes is None:
             return []
-        return [
-            OCRLine([(float(x), float(y)) for x, y in box], str(text), float(score))
-            for box, text, score in zip(out.boxes, out.txts, out.scores)
-        ]
+        return [np.asarray(b, np.float32).reshape(-1, 2) for b in boxes]
+
+    def detect(self, image_bgr: np.ndarray) -> List[np.ndarray]:
+        """Locate every text line on a page (tall pages are searched in overlapping bands).
+
+        A line touching the inside edge of a band may be cut in half there, so such boxes are
+        only used when no other band found the same line whole (the bands overlap by more
+        than a line's height).
+
+        Args:
+            image_bgr: Page image (BGR).
+
+        Returns:
+            Polygons (4x2 float arrays) in page coordinates.
+        """
+        h = image_bgr.shape[0]
+        if h <= self.tile_height * 1.3:
+            return self._detect_once(image_bgr)
+        overlap = 240
+        found: List[Tuple[np.ndarray, int, bool]] = []  # (polygon, band number, cut by band edge)
+        y, band = 0, 0
+        while y < h:
+            y2 = min(h, y + self.tile_height)
+            for poly in self._detect_once(image_bgr[y:y2]):
+                cut = (y > 0 and poly[:, 1].min() < 4) or (y2 < h and poly[:, 1].max() > (y2 - y) - 4)
+                found.append((poly + np.array([0, y], np.float32), band, bool(cut)))
+            if y2 >= h:
+                break
+            y, band = y2 - overlap, band + 1
+
+        def box(p: np.ndarray) -> Tuple[int, int, int, int]:
+            return int(p[:, 0].min()), int(p[:, 1].min()), int(p[:, 0].max()), int(p[:, 1].max())
+
+        def area(p: np.ndarray) -> float:
+            b = box(p)
+            return float((b[2] - b[0]) * (b[3] - b[1]))
+
+        # Lines of one band are all real (tilted neighbours may overlap); only the same line seen
+        # by two different bands is a duplicate. Whole lines win, cut ones only fill real gaps.
+        kept: List[Tuple[np.ndarray, int]] = []
+        for want_cut in (False, True):
+            for poly, b, cut in sorted((f for f in found if f[2] == want_cut), key=lambda f: -area(f[0])):
+                if all(kb == b or bbox_iou(box(poly), box(kp)) < 0.3 for kp, kb in kept):
+                    kept.append((poly, b))
+        return [kp for kp, _ in kept]
+
+    # -- step 2: what does it say? (full-resolution crops, small thread pool) -
+    @staticmethod
+    def _crop_line(image_bgr: np.ndarray, poly: np.ndarray) -> Optional[np.ndarray]:
+        """Straighten one text line into a crop (perspective warp, vertical text turned)."""
+        pts = np.asarray(poly, np.float32)
+        if len(pts) != 4:
+            x1, y1 = pts.min(axis=0)
+            x2, y2 = pts.max(axis=0)
+            pts = np.float32([[x1, y1], [x2, y1], [x2, y2], [x1, y2]])
+        w = int(max(np.linalg.norm(pts[0] - pts[1]), np.linalg.norm(pts[2] - pts[3])))
+        h = int(max(np.linalg.norm(pts[0] - pts[3]), np.linalg.norm(pts[1] - pts[2])))
+        if w < 2 or h < 2:
+            return None
+        dst = np.float32([[0, 0], [w, 0], [w, h], [0, h]])
+        crop = cv2.warpPerspective(image_bgr, cv2.getPerspectiveTransform(pts, dst), (w, h),
+                                   borderMode=cv2.BORDER_REPLICATE, flags=cv2.INTER_CUBIC)
+        return np.ascontiguousarray(np.rot90(crop)) if h / w >= 1.5 else crop
+
+    def _recognise(self, image_bgr: np.ndarray, poly: np.ndarray) -> Optional[OCRLine]:
+        """Read one line; ``None`` if nothing could be read."""
+        crop = self._crop_line(image_bgr, poly)
+        if crop is None:
+            return None
+        try:
+            out = self._reader(crop, use_det=False, use_cls=False, use_rec=True)
+            txts, scores = getattr(out, "txts", None), getattr(out, "scores", None)
+            if not txts:
+                return None
+            return OCRLine([(float(x), float(y)) for x, y in poly], str(txts[0]), float(scores[0]))
+        except Exception as exc:  # noqa: BLE001 - one bad crop must not lose the page
+            logger.debug("line skipped: %s", exc)
+            return None
 
     def read_lines(self, image_bgr: np.ndarray) -> List[OCRLine]:
-        """Recognise all text lines on a page.
+        """Find and read all text lines on a page.
 
-        Very tall pages (webtoon strips) are split into overlapping vertical tiles and the
-        results de-duplicated.
+        First every line is located (cheap, whole page or overlapping bands), then each one is
+        read from the full-resolution image, so no text is ever split between two crops. Lines
+        are read by a small thread pool (``workers``) to keep the computer responsive.
 
         Args:
             image_bgr: Page image (BGR).
@@ -177,20 +258,13 @@ class OCREngine:
         Returns:
             Filtered ``OCRLine`` list in page coordinates.
         """
-        h = image_bgr.shape[0]
-        if h <= self.tile_height * 1.3:
-            return self._filter(self._read_once(image_bgr))
-        raw: List[OCRLine] = []
-        y, overlap = 0, 120
-        while y < h:
-            y2 = min(h, y + self.tile_height)
-            for ln in self._read_once(image_bgr[y:y2]):
-                ln.polygon = [(px, py + y) for px, py in ln.polygon]
-                raw.append(ln)
-            if y2 >= h:
-                break
-            y = y2 - overlap
-        return self._filter(self._dedupe(raw))
+        polys = self.detect(image_bgr)
+        if self.workers <= 1 or len(polys) < 3:
+            lines = [self._recognise(image_bgr, p) for p in polys]
+        else:
+            with ThreadPoolExecutor(max_workers=self.workers) as pool:
+                lines = list(pool.map(lambda p: self._recognise(image_bgr, p), polys))
+        return self._filter([ln for ln in lines if ln is not None])
 
     @staticmethod
     def _dedupe(lines: Sequence[OCRLine]) -> List[OCRLine]:

@@ -30,3 +30,18 @@ def worker_threads(heavy: bool = False) -> int:
     """
     cores = os.cpu_count() or 2
     return max(1, cores // 2) if heavy else max(2, cores // 2 + 1)
+
+
+def pool_workers(requested: int = 0, cap: int = 4) -> int:
+    """Threads for a small pool of independent jobs (reading lines, erasing blocks).
+
+    Args:
+        requested: ``0`` = automatic (half of the cores, at most ``cap``); otherwise as given.
+        cap: Upper bound for the automatic choice.
+
+    Returns:
+        Worker count, at least 1.
+    """
+    if requested and requested > 0:
+        return int(requested)
+    return max(1, min(cap, (os.cpu_count() or 2) // 2))

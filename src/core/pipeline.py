@@ -74,7 +74,7 @@ class ComicPipeline:
         if self._ocr is None:
             s = self.settings
             self._ocr = OCREngine(s.get("ocr.min_confidence", 0.25), s.get("ocr.tile_height", 1500), self.log,
-                                  s.get("ocr.max_side", 1280))
+                                  s.get("ocr.max_side", 1280), s.get("ocr.workers", 0))
         return self._ocr
 
     @property
@@ -94,6 +94,8 @@ class ComicPipeline:
                 resolve_path(s.get("inpainting.lama_model", "models/lama_fp32.onnx")),
                 s.get("inpainting.fallback", "telea"), s.get("inpainting.radius", 5),
                 s.get("inpainting.flat_fill", True), self.log,
+                migan_model=resolve_path(s.get("inpainting.migan_model", "models/migan_512.onnx")),
+                workers=s.get("inpainting.workers", 0),
             )
         return self._inpainter
 

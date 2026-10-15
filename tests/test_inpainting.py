@@ -89,3 +89,52 @@ def test_texture_is_restored_and_clusters_do_not_overwrite_each_other():
     out = Inpainter(backend="telea", flat_fill=True, patch_fill=True).inpaint(page[:, :, ::-1].copy(), mask)[:, :, ::-1]
     err = np.abs(out.astype(int) - clean.astype(int)).mean(axis=2)[mask > 0].mean()
     assert err < 8.0, err  # hatching preserved (Telea alone leaves a blurry band)
+
+
+def test_migan_backend_plumbing(tmp_path):
+    """The MI-GAN path packs [0.5-mask, image*(1-mask)] and decodes [-1,1] RGB (stand-in model)."""
+    onnx = pytest.importorskip("onnx")
+    pytest.importorskip("onnxruntime")
+    from onnx import TensorProto as T
+    from onnx import helper
+
+    g = helper.make_graph(
+        [helper.make_node("Slice", ["x", "s", "e", "a"], ["y"])], "stub",
+        [helper.make_tensor_value_info("x", T.FLOAT, [1, 4, 512, 512])],
+        [helper.make_tensor_value_info("y", T.FLOAT, [1, 3, 512, 512])],
+        [helper.make_tensor("s", T.INT64, [1], [1]), helper.make_tensor("e", T.INT64, [1], [4]),
+         helper.make_tensor("a", T.INT64, [1], [1])])
+    model = helper.make_model(g, opset_imports=[helper.make_opsetid("", 13)])
+    model.ir_version = 8
+    path = tmp_path / "migan_512.onnx"
+    onnx.save(model, str(path))
+
+    img = np.random.default_rng(0).integers(0, 255, (300, 400, 3), dtype=np.uint8)
+    mask = np.zeros((300, 400), np.uint8)
+    mask[100:140, 150:260] = 255
+    inp = Inpainter("migan", migan_model=path, flat_fill=False, patch_fill=False, log=lambda m: None)
+    out = inp.inpaint(img, mask)
+    assert inp._session is not None  # the model really ran (no OpenCV fallback)
+    far = np.ones_like(mask, bool)
+    far[60:180, 110:300] = False
+    assert np.abs(out[far].astype(int) - img[far].astype(int)).max() == 0  # untouched outside the mask
+    assert np.abs(out[100:140, 150:260].astype(int) - img[100:140, 150:260].astype(int)).mean() > 20  # erased
+
+
+def test_flat_bubble_halo_is_wiped_but_outline_survives():
+    img = np.full((200, 300, 3), 255, np.uint8)
+    cv2.rectangle(img, (5, 5), (294, 194), (0, 0, 0), 3)  # outline
+    cv2.putText(img, "HELLO", (80, 110), cv2.FONT_HERSHEY_SIMPLEX, 1.6, (0, 0, 0), 3)
+    rng = np.random.default_rng(0)
+    near = cv2.dilate((img.min(axis=2) < 128).astype(np.uint8), np.ones((9, 9), np.uint8))
+    noise = rng.integers(-18, 1, img.shape[:2])  # faint grey halo like JPEG ringing around the letters
+    for c in range(3):
+        ch = img[..., c].astype(int)
+        img[..., c] = np.where((near > 0) & (ch == 255), 255 + noise, ch).clip(0, 255).astype(np.uint8)
+    ink = np.zeros(img.shape[:2], np.uint8)
+    ink[40:170, 40:260] = (img[40:170, 40:260].min(axis=2) < 100).astype(np.uint8) * 255
+    ink = cv2.dilate(ink, np.ones((7, 7), np.uint8))  # as Detector.build_mask does
+    out = Inpainter("telea", log=lambda m: None, workers=1).inpaint(img, ink)
+    inside = out[30:180, 30:270]
+    assert inside.min() >= 250  # letters and their halo are gone
+    assert out[5:8, 100].max() < 60  # the outline was not touched

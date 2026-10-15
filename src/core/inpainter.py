@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, Callable, List, Optional, Tuple
 
@@ -74,20 +76,30 @@ class Inpainter:
         flat_fill: bool = True,
         log: Optional[Callable[[str], None]] = None,
         patch_fill: bool = True,
+        migan_model: Optional[Path] = None,
+        workers: int = 0,
     ) -> None:
         """Create the inpainter.
 
         Args:
-            backend: ``"auto"`` (LaMa if available), ``"lama"``, ``"telea"`` or ``"ns"``.
+            backend: ``"auto"`` (LaMa if available), ``"lama"``, ``"migan"`` (lighter ONNX
+                generator, needs ``migan_model``), ``"telea"`` or ``"ns"``.
             lama_model: Path to ``lama_fp32.onnx``.
             fallback: OpenCV algorithm used when LaMa is unavailable (``telea``/``ns``).
             radius: OpenCV inpainting radius.
             flat_fill: Fill clusters surrounded by a uniform colour with that colour.
             log: Optional logging callback.
             patch_fill: Restore textures (screentone, hatching) by copying clean nearby patches.
+            migan_model: Path of the optional MI-GAN ONNX file.
+            workers: Text blocks erased at the same time (``0`` = automatic, a few at most).
         """
+        from src.utils.sysutils import pool_workers
+
+        self.workers = pool_workers(workers)
+        self._model_lock = threading.Lock()  # the neural model runs one block at a time
         self.backend = backend
         self.lama_model = Path(lama_model) if lama_model else None
+        self.migan_model = Path(migan_model) if migan_model else None
         self.fallback = fallback if fallback in ("telea", "ns") else "telea"
         self.radius = radius
         self.flat_fill = flat_fill
@@ -103,8 +115,11 @@ class Inpainter:
             return False
         if self._session is not None:
             return True
-        if self.lama_model is None or not self.lama_model.exists():
-            self.log("LaMa model not found; using OpenCV inpainting (run with --download-models).")
+        model = self.migan_model if self.backend == "migan" else self.lama_model
+        label = "MI-GAN" if self.backend == "migan" else "LaMa"
+        if model is None or not model.exists():
+            self.log(f"{label} model not found; using OpenCV inpainting"
+                     + (f" (put the .onnx at {model})." if self.backend == "migan" else " (run with --download-models)."))
             self._lama_failed = True
             return False
         try:
@@ -119,11 +134,11 @@ class Inpainter:
             opts.inter_op_num_threads = 1
             opts.enable_mem_pattern = False  # lower peak memory
             opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-            self._session = ort.InferenceSession(str(self.lama_model), sess_options=opts, providers=providers)
-            self.log(f"LaMa loaded ({providers[0]}, {opts.intra_op_num_threads} thread(s)).")
+            self._session = ort.InferenceSession(str(model), sess_options=opts, providers=providers)
+            self.log(f"{label} loaded ({providers[0]}, {opts.intra_op_num_threads} thread(s)).")
             return True
         except Exception as exc:  # noqa: BLE001
-            self.log(f"LaMa could not be loaded ({exc}); using OpenCV inpainting.")
+            self.log(f"{label} could not be loaded ({exc}); using OpenCV inpainting.")
             self._lama_failed = True
             return False
 
@@ -145,6 +160,26 @@ class Inpainter:
         if out.max() <= 1.5:
             out = out * 255.0
         out = np.clip(out, 0, 255).astype(np.uint8)
+        out = cv2.cvtColor(out, cv2.COLOR_RGB2BGR)
+        out = cv2.resize(out, (side, side), interpolation=cv2.INTER_CUBIC)
+        return out[:h, :w]
+
+    def _run_migan(self, crop: np.ndarray, crop_mask: np.ndarray) -> np.ndarray:
+        """Run the MI-GAN 512 generator (input ``[1,4,512,512]`` = ``[0.5-mask, image*(1-mask)]``,
+        image in [-1, 1], RGB; output RGB in [-1, 1])."""
+        h, w = crop.shape[:2]
+        side = max(h, w)
+        pad_b, pad_r = side - h, side - w
+        img = cv2.copyMakeBorder(crop, 0, pad_b, 0, pad_r, cv2.BORDER_REFLECT_101)
+        msk = cv2.copyMakeBorder(crop_mask, 0, pad_b, 0, pad_r, cv2.BORDER_CONSTANT, value=0)
+        img = cv2.resize(img, (LAMA_SIZE, LAMA_SIZE), interpolation=cv2.INTER_AREA)
+        msk = cv2.resize(msk, (LAMA_SIZE, LAMA_SIZE), interpolation=cv2.INTER_NEAREST)
+        rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0 * 2.0 - 1.0
+        mk = (msk > 120).astype(np.float32)[None, None]
+        erased = np.transpose(rgb, (2, 0, 1))[None] * (1.0 - mk)
+        inp = np.concatenate([0.5 - mk, erased], axis=1).astype(np.float32)
+        out = self._session.run(None, {self._session.get_inputs()[0].name: inp})[0][0]
+        out = np.clip(np.round(np.transpose(out, (1, 2, 0)) * 127.5 + 127.5), 0, 255).astype(np.uint8)
         out = cv2.cvtColor(out, cv2.COLOR_RGB2BGR)
         out = cv2.resize(out, (side, side), interpolation=cv2.INTER_CUBIC)
         return out[:h, :w]
@@ -227,7 +262,8 @@ class Inpainter:
         """LaMa (if ready) or OpenCV reconstruction of the masked pixels."""
         if use_lama:
             try:
-                return self._run_lama(crop, cmask)
+                with self._model_lock:
+                    return (self._run_migan if self.backend == "migan" else self._run_lama)(crop, cmask)
             except Exception as exc:  # noqa: BLE001
                 self.log(f"LaMa failed on a block ({exc}); using OpenCV for it.")
         return self._run_opencv(crop, cmask)
@@ -258,18 +294,29 @@ class Inpainter:
             return result
         h, w = mask.shape
         use_lama = self._lama_ready()
-        for x, y, cw, ch in self._clusters(mask):
+        clusters = self._clusters(mask)
+        halo = max(5, int(w * 0.011))  # JPEG ringing reaches this far around letters
+
+        def work(box: Tuple[int, int, int, int]) -> Optional[Tuple[int, int, int, int, np.ndarray, np.ndarray]]:
+            """Reconstruct one block from the ORIGINAL page (read-only, so blocks can run in parallel)."""
+            x, y, cw, ch = box
             pad = max(24, int(0.6 * max(cw, ch)))
             x1, y1, x2, y2 = max(0, x - pad), max(0, y - pad), min(w, x + cw + pad), min(h, y + ch + pad)
             crop = image_bgr[y1:y2, x1:x2]
             cmask = np.zeros((y2 - y1, x2 - x1), np.uint8)  # only THIS cluster's pixels
             cmask[y - y1: y - y1 + ch, x - x1: x - x1 + cw] = mask[y: y + ch, x: x + cw]
             if not cmask.any():
-                continue
+                return None
             fill = self._flat_colour(crop, cmask) if self.flat_fill else None
             if fill is not None:
                 new = crop.copy()
                 new[cmask > 0] = fill
+                # Flat bubble: also wipe the faint halo around the letters (JPEG noise), but never
+                # touch strong colours such as the bubble outline.
+                near = cv2.dilate(cmask, np.ones((2 * halo + 1, 2 * halo + 1), np.uint8)) > 0
+                close = np.linalg.norm(crop.astype(np.float32) - np.array(fill, np.float32), axis=2) < 60.0
+                new[near & close] = fill
+                cmask = np.where(near & close, 255, cmask).astype(np.uint8)
             else:
                 new, rest = crop.copy(), cmask.copy()
                 if self.patch_fill:  # textures first: copy clean patches tile by tile
@@ -288,8 +335,19 @@ class Inpainter:
                         rest[oy: oy + ph, ox: ox + pw][sel] = 0
                 if rest.any():  # whatever could not be copied is reconstructed
                     new = self._reconstruct(new, rest, use_lama)
+            return x1, y1, x2, y2, new, cmask
+
+        if self.workers > 1 and len(clusters) > 1:
+            with ThreadPoolExecutor(max_workers=self.workers) as pool:
+                done = list(pool.map(work, clusters))
+        else:
+            done = [work(c) for c in clusters]
+        for item in done:  # blend in page order
+            if item is None:
+                continue
+            x1, y1, x2, y2, new, cmask = item
             soft = cv2.GaussianBlur((cmask > 0).astype(np.float32), (0, 0), 1.2)[..., None]
             soft = np.where(cmask[..., None] > 0, 1.0, soft)
-            current = result[y1:y2, x1:x2].astype(np.float32)  # keeps what earlier clusters produced
+            current = result[y1:y2, x1:x2].astype(np.float32)  # keeps what earlier blocks produced
             result[y1:y2, x1:x2] = np.clip(new.astype(np.float32) * soft + current * (1 - soft), 0, 255).astype(np.uint8)
         return result

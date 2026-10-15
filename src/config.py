@@ -78,10 +78,13 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
         "min_confidence": 0.25,
         "tile_height": 1500,
         "max_side": 1280,
+        "workers": 0,  # 0 = automatic (a few threads at most)
     },
     "inpainting": {
         "backend": "auto",
         "lama_model": "models/lama_fp32.onnx",
+        "migan_model": "models/migan_512.onnx",
+        "workers": 0,  # blocks erased at once; 0 = automatic (a few at most)
         "fallback": "telea",
         "radius": 5,
         "flat_fill": True,

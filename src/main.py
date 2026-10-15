@@ -35,7 +35,7 @@ def build_parser() -> argparse.ArgumentParser:
     cli.add_argument("--model", help="Gemini model name")
     cli.add_argument("--order", choices=["rtl", "ltr"], help="Reading order")
     cli.add_argument("--format", choices=["png", "jpg", "webp"], help="Output format")
-    cli.add_argument("--inpaint", choices=["auto", "lama", "telea", "ns"], help="Inpainting backend")
+    cli.add_argument("--inpaint", choices=["auto", "lama", "migan", "telea", "ns"], help="Inpainting backend")
     cli.add_argument("--download-models", action="store_true", help="Download the LaMa ONNX model and exit")
     return parser
 

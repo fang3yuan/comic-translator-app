@@ -241,3 +241,47 @@ class ProgressPanel(ctk.CTkFrame):
         """Set the bar fraction and status text."""
         self.bar.set(max(0.0, min(1.0, fraction)))
         self.label.configure(text=text)
+
+
+def install_clipboard_fix(root: tk.Misc) -> None:
+    """Make copy/paste work in every text field, whatever the keyboard layout.
+
+    Tk matches Ctrl+V by the typed letter, so with an Arabic layout it does nothing.
+    This also matches by hardware key code, and adds a right-click menu
+    (Cut / Copy / Paste / Select all).
+    """
+    codes = {67: "<<Copy>>", 86: "<<Paste>>", 88: "<<Cut>>"}
+
+    def target(event: tk.Event) -> Optional[tk.Misc]:
+        w = event.widget if isinstance(event.widget, tk.Misc) else root.focus_get()
+        return w if w is not None and w.winfo_class() in ("Text", "Entry", "TEntry") else None
+
+    def on_ctrl(event: tk.Event) -> Optional[str]:
+        w = target(event)
+        if w is None or str(event.keysym).lower() in ("c", "v", "x", "a"):
+            return None  # not a text field, or the normal binding already handles it
+        if event.keycode == 65:
+            if w.winfo_class() == "Text":
+                w.tag_add("sel", "1.0", "end-1c")
+            else:
+                w.selection_range(0, "end")
+            return "break"
+        if event.keycode in codes:
+            w.event_generate(codes[event.keycode])
+            return "break"
+        return None
+
+    def on_right_click(event: tk.Event) -> None:
+        w = target(event)
+        if w is None:
+            return
+        w.focus_set()
+        menu = tk.Menu(root, tearoff=0)
+        menu.add_command(label="Cut", command=lambda: w.event_generate("<<Cut>>"))
+        menu.add_command(label="Copy", command=lambda: w.event_generate("<<Copy>>"))
+        menu.add_command(label="Paste", command=lambda: w.event_generate("<<Paste>>"))
+        menu.tk_popup(event.x_root, event.y_root)
+
+    root._clipboard_handler = on_ctrl  # type: ignore[attr-defined]  (used by tests)
+    root.bind_all("<Control-KeyPress>", on_ctrl, add="+")
+    root.bind_all("<Button-3>", on_right_click, add="+")

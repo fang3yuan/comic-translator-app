@@ -131,3 +131,39 @@ def test_room_stops_before_a_neighbouring_text():
     cv2.putText(img, "NEXT", (330, 110), cv2.FONT_HERSHEY_SIMPLEX, 1.6, (0, 0, 0), 4)
     box, _ = _room(img, (100, 80, 250, 120))
     assert box[2] < 330
+
+
+def test_detect_never_keeps_a_line_cut_by_a_band_edge(monkeypatch):
+    """A line cut at the band boundary is replaced by the whole copy seen in the next band."""
+    eng = OCREngine(tile_height=1000, workers=1)  # bands: 0-1000, 760-1760, ...
+    calls = []
+
+    def fake(band):
+        y_offset = len(calls) * 760
+        calls.append(y_offset)
+        if y_offset == 0:  # the same text line at page y 960..1010, cut in this band
+            return [np.array([[10, 960], [200, 960], [200, 999], [10, 999]], np.float32)]
+        if y_offset == 760:  # whole, page y 960..1010
+            return [np.array([[10, 200], [200, 200], [200, 250], [10, 250]], np.float32)]
+        return []
+
+    monkeypatch.setattr(eng, "_detect_once", fake)
+    polys = eng.detect(np.zeros((1900, 300, 3), np.uint8))
+    assert len(polys) == 1
+    assert polys[0][:, 1].max() - polys[0][:, 1].min() >= 49  # the whole line, not the cut piece
+
+
+def test_detect_keeps_overlapping_neighbours_of_one_band(monkeypatch):
+    """Tilted neighbouring lines of the same band overlap but are different lines."""
+    eng = OCREngine(tile_height=1000, workers=1)
+    a = np.array([[0, 0], [100, 10], [100, 40], [0, 30]], np.float32)
+    b = np.array([[0, 20], [100, 30], [100, 60], [0, 50]], np.float32)
+    monkeypatch.setattr(eng, "_detect_once", lambda img: [a, b])
+    assert len(eng.detect(np.zeros((1000, 200, 3), np.uint8))) == 2
+
+
+def test_pool_workers_is_bounded():
+    from src.utils.sysutils import pool_workers
+
+    assert pool_workers(3) == 3
+    assert 1 <= pool_workers(0) <= 4

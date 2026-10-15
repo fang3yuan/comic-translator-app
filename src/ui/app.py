@@ -19,6 +19,7 @@ from src.translators import DEFAULT_MODEL, KEY_URL, TranslationError, diagnose, 
 from src.ui.canvas import ImageCanvas
 from src.ui.setup_dialog import SetupDialog
 from src.ui.widgets import (
+    install_clipboard_fix,
     ColorButton,
     ErrorModal,
     LabeledEntry,
@@ -54,6 +55,7 @@ class ComicTranslatorApp(ctk.CTk):
         ctk.set_appearance_mode(self.settings.get("general.theme", "dark"))
         ctk.set_default_color_theme("blue")
         super().__init__()
+        install_clipboard_fix(self)
         self._dnd_ok = False
         if HAS_DND:
             try:
@@ -301,6 +303,17 @@ class ComicTranslatorApp(ctk.CTk):
         self.log_box.grid(row=1, column=0, sticky="ew", padx=8, pady=(2, 8))
 
     # -- Translation tab -------------------------------------------------
+    def _paste_key(self) -> None:
+        """Append the clipboard text to the keys box (works with any keyboard layout)."""
+        try:
+            text = self.clipboard_get().strip()
+        except Exception:  # noqa: BLE001 - empty clipboard
+            messagebox.showinfo("Clipboard", "The clipboard is empty. Copy the key first.")
+            return
+        have = self.keys_box.get("1.0", "end").strip()
+        self.keys_box.delete("1.0", "end")
+        self.keys_box.insert("1.0", (have + "\n" if have else "") + text)
+
     def _build_translation_tab(self, tab: ctk.CTkFrame) -> None:
         """Gemini keys, model, custom instructions and options."""
         s = self.settings
@@ -309,6 +322,8 @@ class ComicTranslatorApp(ctk.CTk):
         self.keys_box = ctk.CTkTextbox(tab, height=84, wrap="none")
         self.keys_box.pack(fill="x", pady=2)
         self.keys_box.insert("1.0", "\n".join(parse_keys(s.get("translation.gemini_keys", []))))
+        ctk.CTkButton(tab, text="📋 Paste key from clipboard", fg_color="gray30",
+                      command=self._paste_key).pack(fill="x", pady=2)
         ctk.CTkButton(tab, text="🔑 Get a free key (opens Google AI Studio)", fg_color="gray30",
                       command=lambda: webbrowser.open(KEY_URL)).pack(fill="x", pady=2)
         self.model = LabeledEntry(tab, "Model", s.get("translation.model", DEFAULT_MODEL), width=240)
@@ -583,7 +598,7 @@ class ComicTranslatorApp(ctk.CTk):
         s = self.settings
         self.reading = LabeledOption(tab, "Reading order", ["rtl", "ltr"], s.get("general.reading_order"))
         self.reading.pack(fill="x", pady=4)
-        self.inpaint_backend = LabeledOption(tab, "Inpainting", ["auto", "lama", "telea", "ns"],
+        self.inpaint_backend = LabeledOption(tab, "Inpainting", ["auto", "lama", "migan", "telea", "ns"],
                                              s.get("inpainting.backend"))
         self.inpaint_backend.pack(fill="x", pady=4)
         self.out_format = LabeledOption(tab, "Export format", ["png", "jpg", "webp"], s.get("general.output_format"))
