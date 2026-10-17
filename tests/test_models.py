@@ -64,7 +64,10 @@ def test_truncated_download_is_never_kept(models_dir, monkeypatch):
     assert not modelstore.is_installed("lama") and not list(models_dir.iterdir())
 
 
-def test_model_without_link_must_be_imported(models_dir, tmp_path):
+def test_model_without_link_must_be_imported(models_dir, tmp_path, monkeypatch):
+    import dataclasses
+
+    monkeypatch.setitem(modelstore.CATALOG, "migan", dataclasses.replace(modelstore.CATALOG["migan"], url=None))
     with pytest.raises(RuntimeError, match="Import"):
         modelstore.download("migan")
     src = tmp_path / "somewhere" / "my_migan.onnx"

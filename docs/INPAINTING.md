@@ -6,7 +6,7 @@
 |--------|---------|-------|--------|
 | **LaMa Manga** (موصى به) | `lama_manga` | `models/lama-manga-dynamic.onnx` | LaMa مدرَّب على المانغا (~207 MB، رخصة MIT) |
 | LaMa عام | `lama` | `models/lama_fp32.onnx` | للكوميكس الملوّن |
-| MI-GAN 512 | `migan` | `models/migan_512.onnx` | أخف، يُستورد من ملف `.onnx` (لا رابط تنزيل) |
+| MI-GAN 512 | `migan` | `models/migan_512.onnx` | أخف (~30 MB)؛ يُنزَّل من Hugging Face أو يُستورد من ملف |
 | OpenCV | `telea` / `ns` | لا يحتاج | الأخف والأقل جودة |
 | تلقائي | `auto` | — | أفضل نموذج مثبّت بالترتيب أعلاه |
 

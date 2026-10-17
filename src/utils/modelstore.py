@@ -49,8 +49,9 @@ CATALOG: Dict[str, ModelInfo] = {m.key: m for m in (
     ModelInfo("lama", "LaMa (general)", "General-purpose LaMa: good for colour comics and artwork.",
               "lama_fp32.onnx", "https://huggingface.co/Carve/LaMa-ONNX/resolve/main/lama_fp32.onnx",
               "~208 MB", "lama"),
-    ModelInfo("migan", "MI-GAN 512 (light)", "Smaller and lighter; better on textures, slower. Import the .onnx file.",
-              "migan_512.onnx", None, "~30 MB", "migan"),
+    ModelInfo("migan", "MI-GAN 512 (light)", "Smaller and lighter; better on textures, slower.",
+              "migan_512.onnx", "https://huggingface.co/andraniksargsyan/migan/resolve/main/migan.onnx",
+              "~30 MB", "migan"),
 )}
 
 OPENCV_BACKENDS = ("telea", "ns")
