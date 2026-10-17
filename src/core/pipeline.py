@@ -12,17 +12,24 @@ from typing import Callable, List, Optional, Sequence, Union
 
 from PIL import Image
 
-from src.config import Settings, resolve_path
+from src.config import Settings
 from src.core.detector import Detector
 from src.core.inpainter import Inpainter
 from src.core.models import TextRegion
 from src.core.ocr import OCREngine, clean_ocr_text, estimate_style
 from src.core.renderer import Typesetter
-from src.translators import GeminiTranslator, TranslateItem, TranslationError, create_translator, suggest_max_chars
+from src.translators import (
+    GeminiTranslator,
+    SeriesMemory,
+    TranslateItem,
+    TranslationError,
+    create_translator,
+    suggest_max_chars,
+)
 from src.utils.arabic_utils import postprocess_translation
 from src.utils.font_matcher import FontMatcher, classify_roles
 from src.utils.text_filters import is_credit_text
-from src.utils.image_utils import bgr_to_pil, load_image, pil_to_bgr, save_image
+from src.utils.image_utils import bgr_to_pil, load_image, numbered_page_jpeg, pil_to_bgr, save_image
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +71,7 @@ class ComicPipeline:
         self._detector: Optional[Detector] = None
         self._inpainter: Optional[Inpainter] = None
         self._translator: Optional[GeminiTranslator] = None
+        self.memory = SeriesMemory()  # names / summary shared by the pages of one series
         self.fonts = FontMatcher(settings)
         self.typesetter = Typesetter(settings, self.fonts, self.log)
 
@@ -90,12 +98,9 @@ class ComicPipeline:
         if self._inpainter is None:
             s = self.settings
             self._inpainter = Inpainter(
-                s.get("inpainting.backend", "auto"),
-                resolve_path(s.get("inpainting.lama_model", "models/lama_fp32.onnx")),
-                s.get("inpainting.fallback", "telea"), s.get("inpainting.radius", 5),
-                s.get("inpainting.flat_fill", True), self.log,
-                migan_model=resolve_path(s.get("inpainting.migan_model", "models/migan_512.onnx")),
-                workers=s.get("inpainting.workers", 0),
+                s.get("inpainting.backend", "auto"), s.get("inpainting.backup", "telea"),
+                s.get("inpainting.radius", 5), s.get("inpainting.flat_fill", True), self.log,
+                s.get("inpainting.patch_fill", True), s.get("inpainting.workers", 0),
             )
         return self._inpainter
 
@@ -103,19 +108,19 @@ class ComicPipeline:
     def translator(self) -> GeminiTranslator:
         """Gemini translator built from the current settings."""
         if self._translator is None:
-            self._translator = create_translator(self.settings)
+            self._translator = create_translator(self.settings, self.memory)
         return self._translator
 
     def reload_settings(self, full: bool = False) -> None:
         """Drop cached components so changed settings take effect.
 
         Args:
-            full: Also rebuild OCR/detector/inpainter (reloads their models).
-                Translator, fonts and typesetter are always rebuilt.
+            full: Also rebuild OCR/detector (reloads their models).
+                Translator, inpainter, fonts and typesetter are always rebuilt (cheap until used).
         """
-        self._translator = None
+        self._translator = self._inpainter = None
         if full:
-            self._ocr = self._detector = self._inpainter = None
+            self._ocr = self._detector = None
         self.fonts = FontMatcher(self.settings)
         self.typesetter = Typesetter(self.settings, self.fonts, self.log)
 
@@ -150,11 +155,16 @@ class ComicPipeline:
         fits = int(((x2 - x1) / (0.52 * fs)) * max(1.0, (y2 - y1) / (1.3 * fs)))
         return max(int(0.7 * n) + 3, min(suggest_max_chars(region.text), fits))
 
-    def translate_regions(self, regions: Sequence[TextRegion]) -> None:
+    def translate_regions(self, regions: Sequence[TextRegion], image: Optional[Image.Image] = None) -> None:
         """Translate (or re-translate) the source text of all enabled regions in ONE request.
+
+        Blocks Gemini did not return keep their English text (and are logged) instead of failing the page.
+        With ``translation.vision`` on and a page ``image``, Gemini also sees the numbered boxes and may
+        correct OCR mistakes in ``region.text``.
 
         Args:
             regions: Regions modified in place.
+            image: The page (needed for picture mode).
 
         Raises:
             TranslationError: If Gemini fails and ``on_failure == "raise"``.
@@ -166,8 +176,12 @@ class ComicPipeline:
         if not targets:
             return
         items = [TranslateItem(r.id, r.text, r.role.value, self.length_budget(r)) for r in targets]
+        picture = None
+        if image is not None and self.settings.get("translation.vision", False):
+            picture = numbered_page_jpeg(image, {r.id: r.bbox for r in targets})
+        single = len(targets) == 1 and image is None  # re-translating one block: do not disturb the memory
         try:
-            raw = self.translator.translate_items(items)
+            raw = self.translator.translate_items(items, picture, remember=not single)
         except TranslationError:
             if self.settings.get("translation.on_failure", "raise") == "keep_source":
                 self.log("Translation failed; keeping source text.")
@@ -176,11 +190,19 @@ class ComicPipeline:
                 raise
         concise = self.settings.get("translation.concise", True)
         digits = self.settings.get("translation.arabic_digits", False)
+        fixed = 0
         for r in targets:
+            fix = self.translator.last_sources.get(r.id, "")
+            if fix and fix != r.text and 0.4 <= len(fix) / max(1, len(r.text)) <= 2.5:  # a sane OCR correction
+                r.text, fixed = fix, fixed + 1
             r.translation = postprocess_translation(raw.get(r.id, r.text), concise, digits)
+        left = [i for i in self.translator.last_missing if i in {r.id for r in targets}]
+        if left:
+            self.log(f"Gemini skipped {len(left)} block(s) {left}: kept in English - select one and press Re-translate.")
         if self.translator.last_used:
-            self.log(f"Translated {len(targets)} block(s) with {self.translator.last_used} in "
-                     f"{self.translator.requests_sent} request(s) so far.")
+            self.log(f"Translated {len(targets) - len(left)} block(s) with {self.translator.last_used}"
+                     + (f", fixed {fixed} OCR mistake(s)" if fixed else "")
+                     + f" ({self.translator.requests_sent} request(s) so far).")
 
     def clean(self, image: Image.Image, regions: Sequence[TextRegion]) -> Image.Image:
         """Erase the source text of all enabled regions.
@@ -194,7 +216,12 @@ class ComicPipeline:
         """
         bgr = pil_to_bgr(image)
         mask = Detector.build_mask(bgr, regions, self.settings.get("detector.mask_dilate", 3))
-        return bgr_to_pil(self.inpainter.inpaint(bgr, mask))
+        out = self.inpainter.inpaint(bgr, mask)
+        if self.inpainter.last_stats:
+            names = {"plane": "smooth fill", "patch": "texture copy", "model": "AI eraser", "opencv": "OpenCV",
+                     "rollback": "redone with OpenCV"}
+            self.log("Erased: " + ", ".join(f"{n} {names.get(k, k)}" for k, n in self.inpainter.last_stats.items()))
+        return bgr_to_pil(out)
 
     def render(self, page: PageResult) -> Image.Image:
         """Re-typeset a page from its cleaned image and current regions.
@@ -237,7 +264,7 @@ class ComicPipeline:
         # Translation (network) and erasing (CPU) are independent: run them side by side.
         step(0.40, "Erasing text and translating...")
         with ThreadPoolExecutor(max_workers=1) as pool:
-            translation = pool.submit(self.translate_regions, regions)
+            translation = pool.submit(self.translate_regions, regions, image)
             try:
                 cleaned = self.clean(image, regions)
             finally:

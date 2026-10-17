@@ -1,7 +1,7 @@
 ; Inno Setup script - builds ComicTranslator-Setup.exe (run by GitHub Actions)
 #define AppName "Comic Translator"
 #ifndef AppVersion
-  #define AppVersion "2.0.0"
+  #define AppVersion "2.2.0"
 #endif
 
 [Setup]

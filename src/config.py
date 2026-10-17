@@ -59,7 +59,7 @@ def _role_style(**overrides: Any) -> Dict[str, Any]:
     return style
 
 
-SETTINGS_VERSION = 5
+SETTINGS_VERSION = 6
 
 DEFAULT_SETTINGS: Dict[str, Any] = {
     "version": SETTINGS_VERSION,
@@ -81,17 +81,19 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
         "workers": 0,  # 0 = automatic (a few threads at most)
     },
     "inpainting": {
-        "backend": "auto",
-        "lama_model": "models/lama_fp32.onnx",
-        "migan_model": "models/migan_512.onnx",
+        "backend": "auto",  # auto | lama_manga | lama | migan | telea | ns
+        "backup": "telea",  # used when the first choice cannot run
         "workers": 0,  # blocks erased at once; 0 = automatic (a few at most)
-        "fallback": "telea",
         "radius": 5,
-        "flat_fill": True,
+        "flat_fill": True,  # plane fill on smooth paper
+        "patch_fill": True,  # copy clean patches to keep screentone
     },
     "translation": {
         "gemini_keys": [],
         "model": "gemini-3.5-flash-lite",
+        "fallback_models": ["gemini-flash-latest", "gemini-2.5-flash"],
+        "memory": True,  # remember names/summary between pages
+        "vision": False,  # send the page picture so Gemini can fix OCR mistakes
         "notes": "",
         "retries": 3,
         "min_interval": 1.0,
@@ -193,6 +195,12 @@ class Settings:
                 tr["min_interval"] = max(float(tr.get("min_interval", 1.0)), 1.0)
                 tr["timeout"] = max(float(tr.get("timeout", 90)), 90.0)
                 tr["retries"] = max(int(tr.get("retries", 3)), 3)
+            inp = data.get("inpainting")  # v6: models live in the catalogue, backup replaces fallback
+            if isinstance(inp, dict):
+                for old in ("lama_model", "migan_model"):
+                    inp.pop(old, None)
+                if "fallback" in inp:
+                    inp["backup"] = inp.pop("fallback")
             data["version"] = SETTINGS_VERSION
         self.data: Dict[str, Any] = _deep_merge(DEFAULT_SETTINGS, data)
 

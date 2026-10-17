@@ -15,21 +15,25 @@ import customtkinter as ctk
 from src.config import FONTS_DIR, ROLES, Settings
 from src.core.models import BBox, FontRole, TextRegion
 from src.core.pipeline import ComicPipeline, PageResult
-from src.translators import DEFAULT_MODEL, KEY_URL, TranslationError, diagnose, parse_keys
+from src.translators import DEFAULT_MODEL, FALLBACK_MODELS, KEY_URL, KNOWN_MODELS, TranslationError, create_translator, diagnose, parse_keys
 from src.ui.canvas import ImageCanvas
+from src.ui.eraser_panel import EraserPanel
 from src.ui.setup_dialog import SetupDialog
 from src.ui.widgets import (
     install_clipboard_fix,
     ColorButton,
     ErrorModal,
-    LabeledEntry,
+    LabeledCombo,
     LabeledOption,
     LabeledSlider,
     LogBox,
     ProgressPanel,
+    section,
 )
 from src.utils.image_utils import IMAGE_EXTENSIONS, list_images, load_image
+from src.utils import modelstore
 from src.utils.installer import missing_required, open_folder
+from src.utils.preflight import preflight
 
 try:  # optional: drag & drop support
     from tkinterdnd2 import DND_FILES, TkinterDnD
@@ -40,6 +44,7 @@ except Exception:  # noqa: BLE001 - missing package or Tk without tkdnd binaries
 
 VIEW_MODES = ["Original", "Processed", "Side-by-side"]
 AUTO_FONT = "(auto)"
+FAILURE_CHOICES = {"raise": "Stop and show the error", "keep_source": "Keep the English text and go on"}
 
 
 class ComicTranslatorApp(ctk.CTk):
@@ -80,7 +85,8 @@ class ComicTranslatorApp(ctk.CTk):
         self._block_buttons: Dict[int, ctk.CTkButton] = {}
 
         self.grid_columnconfigure(1, weight=1)
-        self.grid_rowconfigure(0, weight=1)
+        self.grid_rowconfigure(1, weight=1)
+        self._build_topbar()
         self._build_sidebar()
         self._build_center()
         self._build_right_panel()
@@ -88,6 +94,7 @@ class ComicTranslatorApp(ctk.CTk):
 
         self.pipeline = ComicPipeline(self.settings, self.log)
         self._load_style_controls()
+        self._refresh_status()
         self.canvas.placeholder = (
             "Drop comic pages or a folder here\nاسحب صفحات الكوميكس أو المجلد وأفلتها هنا"
             if self._dnd_ok else "Press 'Add Images' to begin\n(Drag & drop: open Setup and install it)"
@@ -115,6 +122,8 @@ class ComicTranslatorApp(ctk.CTk):
     def _after_setup(self) -> None:
         """Rebuild engines after something was installed."""
         self.pipeline.reload_settings(full=True)
+        self.eraser.refresh()
+        self._refresh_status()
 
     def _first_run_check(self) -> None:
         """Open Setup on the first launch or when a required part is missing."""
@@ -213,8 +222,11 @@ class ComicTranslatorApp(ctk.CTk):
         self.progress.update_progress(0.0, title)
         low = message.lower()
         action = None
-        if "api key" in low or "keys were rejected" in low:
+        if any(k in low for k in ("api key", "keys were rejected", "every key", "limit", "model not available",
+                                  "none of the selected models")):
             action = ("Open Translation tab", lambda: self.tabs.set("Translation"))
+        elif any(k in low for k in ("onnx", "eraser", "inpaint")):
+            action = ("Open Eraser tab", lambda: self.tabs.set("Eraser"))
         elif any(k in low for k in ("setup", "install")):
             action = ("Open Setup", self.open_setup)
         ErrorModal(self, title, message, action=action)
@@ -230,7 +242,7 @@ class ComicTranslatorApp(ctk.CTk):
         """Left column: file list and actions."""
         side = ctk.CTkFrame(self, width=270)
         self.side_frame = side
-        side.grid(row=0, column=0, sticky="nsw", padx=(8, 4), pady=8)
+        side.grid(row=1, column=0, sticky="nsw", padx=(8, 4), pady=8)
         side.grid_propagate(False)
         side.grid_rowconfigure(5, weight=1)
         ctk.CTkButton(side, text="🛠  Setup / Install", fg_color="#6e40c9", hover_color="#5a32a3",
@@ -263,7 +275,7 @@ class ComicTranslatorApp(ctk.CTk):
         """Centre column: view controls and canvas."""
         center = ctk.CTkFrame(self)
         self.center_frame = center
-        center.grid(row=0, column=1, sticky="nsew", padx=4, pady=8)
+        center.grid(row=1, column=1, sticky="nsew", padx=4, pady=8)
         center.grid_rowconfigure(1, weight=1)
         center.grid_columnconfigure(0, weight=1)
         bar = ctk.CTkFrame(center, fg_color="transparent")
@@ -282,25 +294,74 @@ class ComicTranslatorApp(ctk.CTk):
 
     def _build_right_panel(self) -> None:
         """Right column: tabs for translation, fonts, blocks and general settings."""
-        tabs = ctk.CTkTabview(self, width=340)
-        tabs.grid(row=0, column=2, sticky="nse", padx=(4, 8), pady=8)
+        tabs = ctk.CTkTabview(self, width=380)
+        tabs.grid(row=1, column=2, sticky="nse", padx=(4, 8), pady=8)
         self.tabs = tabs
-        for name in ("Translation", "Fonts & Style", "Blocks", "General"):
+        for name in ("Translation", "Eraser", "Fonts & Style", "Blocks", "General"):
             tabs.add(name)
-        self._build_translation_tab(tabs.tab("Translation"))
-        self._build_style_tab(tabs.tab("Fonts & Style"))
+        self._build_translation_tab(self._scroll(tabs.tab("Translation")))
+        self._build_eraser_tab(self._scroll(tabs.tab("Eraser")))
+        self._build_style_tab(self._scroll(tabs.tab("Fonts & Style")))
         self._build_blocks_tab(tabs.tab("Blocks"))
-        self._build_general_tab(tabs.tab("General"))
+        self._build_general_tab(self._scroll(tabs.tab("General")))
+
+    @staticmethod
+    def _scroll(tab: ctk.CTkFrame) -> ctk.CTkScrollableFrame:
+        """A scrollable body for a tab (settings never get cut off on small screens)."""
+        body = ctk.CTkScrollableFrame(tab, fg_color="transparent")
+        body.pack(fill="both", expand=True)
+        return body
+
+    def _build_topbar(self) -> None:
+        """Top strip: what is configured right now; each chip jumps to the tab that changes it."""
+        bar = ctk.CTkFrame(self, height=40)
+        bar.grid(row=0, column=0, columnspan=3, sticky="ew", padx=8, pady=(8, 0))
+        self.chip_gemini = ctk.CTkButton(bar, text="", fg_color="gray25", height=28,
+                                         command=lambda: self.tabs.set("Translation"))
+        self.chip_eraser = ctk.CTkButton(bar, text="", fg_color="gray25", height=28,
+                                         command=lambda: self.tabs.set("Eraser"))
+        for chip in (self.chip_gemini, self.chip_eraser):
+            chip.pack(side="left", padx=(8, 0), pady=6)
+        ctk.CTkButton(bar, text="🛠 Setup", width=80, height=28, fg_color="#6e40c9", hover_color="#5a32a3",
+                      command=self.open_setup).pack(side="right", padx=8, pady=6)
+        ctk.CTkButton(bar, text="✔ Check everything", width=140, height=28, fg_color="gray30",
+                      command=self._health_check).pack(side="right", pady=6)
+
+    def _refresh_status(self) -> None:
+        """Update the top chips from the saved settings."""
+        s = self.settings
+        n = len(parse_keys(s.get("translation.gemini_keys", [])))
+        self.chip_gemini.configure(
+            text=f"{'🔑' if n else '⚠'} Gemini: {n} key(s) · {s.get('translation.model', DEFAULT_MODEL)}",
+            text_color="#3fb950" if n else "#ff6b6b")
+        first = modelstore.chain(s.get("inpainting.backend", "auto"), s.get("inpainting.backup", "telea"))[0]
+        label = modelstore.CATALOG[first].title if first in modelstore.CATALOG else f"OpenCV ({first})"
+        self.chip_eraser.configure(text=f"🧽 Eraser: {label}",
+                                   text_color="#3fb950" if first in modelstore.CATALOG else "#d29922")
+
+    def _health_check(self) -> None:
+        """Explain every problem with the current settings (or confirm all is fine)."""
+        self._sync_translation()
+        issues = preflight(self.settings, self.out_dir)
+        if not issues:
+            ErrorModal(self, "All good | كل شيء جاهز", "Keys, eraser, fonts and libraries are ready.", error=False)
+            return
+        text = "\n\n".join(f"{'✘' if i.error else '!'}  {i.text}" for i in issues)
+        first = issues[0]
+        action = (f"Open {first.tab}", lambda: self.tabs.set(first.tab)) if first.tab else ("Open Setup", self.open_setup)
+        ErrorModal(self, "Problems found | مشاكل", text, error=any(i.error for i in issues), action=action)
 
     def _build_bottom(self) -> None:
         """Bottom strip: progress bar and log."""
         bottom = ctk.CTkFrame(self)
-        bottom.grid(row=1, column=0, columnspan=3, sticky="ew", padx=8, pady=(0, 8))
+        bottom.grid(row=2, column=0, columnspan=3, sticky="ew", padx=8, pady=(0, 8))
         bottom.grid_columnconfigure(0, weight=1)
         self.progress = ProgressPanel(bottom)
         self.progress.grid(row=0, column=0, sticky="ew", padx=8, pady=(6, 2))
         self.log_box = LogBox(bottom, height=110)
         self.log_box.grid(row=1, column=0, sticky="ew", padx=8, pady=(2, 8))
+        ctk.CTkButton(bottom, text="Clear log", width=80, height=22, fg_color="gray30",
+                      command=self.log_box.clear).grid(row=0, column=1, padx=(0, 8), pady=(6, 2))
 
     # -- Translation tab -------------------------------------------------
     def _paste_key(self) -> None:
@@ -315,50 +376,90 @@ class ComicTranslatorApp(ctk.CTk):
         self.keys_box.insert("1.0", (have + "\n" if have else "") + text)
 
     def _build_translation_tab(self, tab: ctk.CTkFrame) -> None:
-        """Gemini keys, model, custom instructions and options."""
+        """Gemini keys, main + backup models, memory, picture mode and options."""
         s = self.settings
-        ctk.CTkLabel(tab, text="Gemini API keys (one per line)  |  مفاتيح Gemini (مفتاح في كل سطر)",
-                     anchor="w", wraplength=320, justify="left").pack(fill="x", pady=(2, 0))
+        section(tab, "Gemini keys", "One per line. Several keys from different Google accounts = more free quota.")
         self.keys_box = ctk.CTkTextbox(tab, height=84, wrap="none")
         self.keys_box.pack(fill="x", pady=2)
         self.keys_box.insert("1.0", "\n".join(parse_keys(s.get("translation.gemini_keys", []))))
-        ctk.CTkButton(tab, text="📋 Paste key from clipboard", fg_color="gray30",
-                      command=self._paste_key).pack(fill="x", pady=2)
-        ctk.CTkButton(tab, text="🔑 Get a free key (opens Google AI Studio)", fg_color="gray30",
-                      command=lambda: webbrowser.open(KEY_URL)).pack(fill="x", pady=2)
-        self.model = LabeledEntry(tab, "Model", s.get("translation.model", DEFAULT_MODEL), width=240)
-        self.model.pack(fill="x", pady=4)
+        row = ctk.CTkFrame(tab, fg_color="transparent")
+        row.pack(fill="x")
+        ctk.CTkButton(row, text="📋 Paste", width=80, fg_color="gray30", command=self._paste_key).pack(side="left")
+        ctk.CTkButton(row, text="🔑 Get a free key", fg_color="gray30",
+                      command=lambda: webbrowser.open(KEY_URL)).pack(side="left", fill="x", expand=True, padx=4)
+        ctk.CTkButton(row, text="🔎 Test", width=70, command=self._test_translation).pack(side="left")
+
+        section(tab, "Models", "Pick from the list or type a model name. Backups take over when the main model "
+                               "is out of quota or does not exist.")
+        names = list(dict.fromkeys([*KNOWN_MODELS, s.get("translation.model", DEFAULT_MODEL),
+                                    *s.get("translation.fallback_models", [])]))
+        backups = [*s.get("translation.fallback_models", list(FALLBACK_MODELS)), "", ""]
+        self.model = LabeledCombo(tab, "Main model", names, s.get("translation.model", DEFAULT_MODEL))
+        self.model.pack(fill="x", pady=2)
+        self.backup1 = LabeledCombo(tab, "Backup model 1", names, backups[0])
+        self.backup1.pack(fill="x", pady=2)
+        self.backup2 = LabeledCombo(tab, "Backup model 2", names, backups[1])
+        self.backup2.pack(fill="x", pady=2)
+        ctk.CTkButton(tab, text="↻ Load the models my key can use", fg_color="gray30",
+                      command=self._load_models).pack(fill="x", pady=4)
+
+        section(tab, "Consistency", "Helps names and tone stay the same across the pages of one chapter.")
+        self.memory = self._switch(tab, "Remember names and story between pages", "translation.memory", True)
+        ctk.CTkButton(tab, text="Forget the story (new series)", fg_color="gray30", height=26,
+                      command=self._forget_memory).pack(fill="x", pady=2)
+        self.vision = self._switch(tab, "Show Gemini the page picture (fixes OCR mistakes, uses more quota)",
+                                   "translation.vision", False)
         ctk.CTkLabel(tab, text="Instructions for the translator (tone, names, glossary) — optional",
-                     anchor="w", wraplength=320, justify="left").pack(fill="x", pady=(4, 0))
+                     anchor="w", wraplength=330, justify="left").pack(fill="x", pady=(8, 0))
         self.notes_box = ctk.CTkTextbox(tab, height=64, wrap="word")
         self.notes_box.pack(fill="x", pady=2)
         self.notes_box.insert("1.0", s.get("translation.notes", ""))
+
+        section(tab, "Text")
+        self.concise = self._switch(tab, "Shorten Arabic to fit the text box", "translation.concise", True)
+        self.erase_credits = self._switch(tab, "Erase credit / website texts without translating them",
+                                          "translation.erase_credits", True)
+        self.arabic_digits = self._switch(tab, "Use Arabic-Indic digits (٠١٢)", "translation.arabic_digits", False)
         self.interval = LabeledSlider(tab, "Seconds between requests", 0, 5,
                                       s.get("translation.min_interval", 1.0), 50, "{:.1f}")
         self.interval.pack(fill="x", pady=4)
-        self.concise = ctk.CTkSwitch(tab, text="Shorten Arabic to fit the text box")
-        self.concise.pack(anchor="w", pady=3)
-        if s.get("translation.concise", True):
-            self.concise.select()
-        self.erase_credits = ctk.CTkSwitch(tab, text="Erase credit / website texts without translating them")
-        self.erase_credits.pack(anchor="w", pady=3)
-        if s.get("translation.erase_credits", True):
-            self.erase_credits.select()
-        self.arabic_digits = ctk.CTkSwitch(tab, text="Use Arabic-Indic digits (٠١٢)")
-        self.arabic_digits.pack(anchor="w", pady=3)
-        if s.get("translation.arabic_digits", False):
-            self.arabic_digits.select()
-        ctk.CTkButton(tab, text="Save settings", command=lambda: self._sync_translation(log=True)).pack(
-            fill="x", pady=(10, 4))
-        ctk.CTkButton(tab, text="🔎 Test my keys", fg_color="gray30",
-                      command=self._test_translation).pack(fill="x", pady=4)
+        ctk.CTkButton(tab, text="Save", command=lambda: self._sync_translation(log=True)).pack(fill="x", pady=(10, 4))
+
+    def _switch(self, tab: ctk.CTkFrame, text: str, key: str, default: bool) -> ctk.CTkSwitch:
+        """A switch initialised from settings."""
+        sw = ctk.CTkSwitch(tab, text=text)
+        sw.pack(anchor="w", pady=3)
+        if self.settings.get(key, default):
+            sw.select()
+        return sw
+
+    def _forget_memory(self) -> None:
+        """Clear the remembered story/names (start of a new series)."""
+        self.pipeline.memory.clear()
+        self.log("Story memory cleared.")
+
+    def _load_models(self) -> None:
+        """Ask Google which models this key can use and offer them in the lists."""
+        self._sync_translation()
+
+        def done(names: List[str]) -> None:
+            for combo in (self.model, self.backup1, self.backup2):
+                combo.set_values(names)
+            self.log(f"{len(names)} model(s) available for your key.")
+
+        self._run_task(lambda: create_translator(self.settings).list_models(), done, "Loading models...")
 
     def _sync_translation(self, log: bool = False) -> None:
         """Copy the translation widgets into settings; rebuild the translator if they changed."""
         s = self.settings
+        main = self.model.get() or DEFAULT_MODEL
+        backups = [b for b in dict.fromkeys([self.backup1.get(), self.backup2.get()]) if b and b != "(none)" and b != main]
         new = {
             "translation.gemini_keys": parse_keys(self.keys_box.get("1.0", "end")),
-            "translation.model": self.model.get().strip() or DEFAULT_MODEL,
+            "translation.model": main,
+            "translation.fallback_models": backups,
+            "translation.memory": bool(self.memory.get()),
+            "translation.vision": bool(self.vision.get()),
             "translation.notes": self.notes_box.get("1.0", "end").strip(),
             "translation.min_interval": round(self.interval.get(), 1),
             "translation.concise": bool(self.concise.get()),
@@ -371,9 +472,10 @@ class ComicTranslatorApp(ctk.CTk):
         if changed:
             s.save()
             self.pipeline.reload_settings()
+            self._refresh_status()
         if log:
-            n = len(new["translation.gemini_keys"])
-            self.log(f"Translation settings saved ({n} key(s), model {new['translation.model']}).")
+            self.log(f"Translation settings saved ({len(new['translation.gemini_keys'])} key(s), model {main}"
+                     + (f", backups {', '.join(backups)}" if backups else "") + ").")
 
     def _test_translation(self) -> None:
         """Test every key in the background and show a readable report."""
@@ -580,7 +682,7 @@ class ComicTranslatorApp(ctk.CTk):
         """Re-translate the selected block with Gemini."""
         r = self._region(self.selected_region)
         page = self.pages.get(self.current) if self.current else None
-        if r is None or page is None or not self._require_key():
+        if r is None or page is None or not self._preflight():
             return
 
         def work() -> None:
@@ -592,37 +694,90 @@ class ComicTranslatorApp(ctk.CTk):
 
         self._run_task(work, done, "Translating block...")
 
+    # -- Eraser tab ------------------------------------------------------
+    def _build_eraser_tab(self, tab: ctk.CTkFrame) -> None:
+        """Choose, install, import or remove the eraser models."""
+        section(tab, "Text eraser", "Choose how the original text is removed. Press Install on ONE model - "
+                                    "you do not need the others.")
+        self.eraser = EraserPanel(tab, self.settings, self._run_task, self._progress_cb, self.log, self._eraser_changed)
+        self.eraser.pack(fill="x")
+
+    def _eraser_changed(self) -> None:
+        """A different eraser was chosen or its files changed: rebuild it and update the chip."""
+        self.pipeline.reload_settings()
+        self._refresh_status()
+
     # -- General tab -----------------------------------------------------
     def _build_general_tab(self, tab: ctk.CTkFrame) -> None:
-        """Reading order, engines, output and theme."""
+        """Reading order, output, theme and the advanced engine settings."""
         s = self.settings
         self.reading = LabeledOption(tab, "Reading order", ["rtl", "ltr"], s.get("general.reading_order"))
         self.reading.pack(fill="x", pady=4)
-        self.inpaint_backend = LabeledOption(tab, "Inpainting", ["auto", "lama", "migan", "telea", "ns"],
-                                             s.get("inpainting.backend"))
-        self.inpaint_backend.pack(fill="x", pady=4)
         self.out_format = LabeledOption(tab, "Export format", ["png", "jpg", "webp"], s.get("general.output_format"))
         self.out_format.pack(fill="x", pady=4)
-        self.save_json = ctk.CTkSwitch(tab, text="Save project JSON on export")
-        self.save_json.pack(anchor="w", pady=4)
-        if s.get("general.save_project_json", True):
-            self.save_json.select()
+        self.jpg_quality = LabeledSlider(tab, "JPG / WebP quality", 60, 100, s.get("general.jpg_quality", 95), 40, "{:.0f}")
+        self.jpg_quality.pack(fill="x", pady=4)
+        self.save_json = self._switch(tab, "Save project JSON on export", "general.save_project_json", True)
         self.theme = LabeledOption(tab, "Theme", ["dark", "light", "system"], s.get("general.theme"),
                                    command=lambda v: ctk.set_appearance_mode(v))
         self.theme.pack(fill="x", pady=4)
-        ctk.CTkButton(tab, text="Save General Settings", command=self._save_general).pack(fill="x", pady=(12, 4))
+
+        section(tab, "Advanced", "Defaults are fine for most pages.")
+        self.ocr_conf = LabeledSlider(tab, "Text detection sensitivity (lower finds more)", 0.1, 0.8,
+                                      s.get("ocr.min_confidence", 0.25), 70, "{:.2f}")
+        self.ocr_conf.pack(fill="x", pady=4)
+        self.ocr_workers = LabeledOption(tab, "Text reading threads", ["auto", "1", "2", "3", "4", "6"],
+                                         "auto" if not s.get("ocr.workers", 0) else str(s.get("ocr.workers")))
+        self.ocr_workers.pack(fill="x", pady=4)
+        self.mask_grow = LabeledSlider(tab, "Extra margin around erased letters (px)", 0, 8,
+                                       s.get("detector.mask_dilate", 3), 8, "{:.0f}")
+        self.mask_grow.pack(fill="x", pady=4)
+        self.retries = LabeledSlider(tab, "Retries when Gemini fails or answers badly", 1, 6,
+                                     s.get("translation.retries", 3), 5, "{:.0f}")
+        self.retries.pack(fill="x", pady=4)
+        self.timeout = LabeledSlider(tab, "Wait for Gemini (seconds)", 30, 180, s.get("translation.timeout", 90), 15, "{:.0f}")
+        self.timeout.pack(fill="x", pady=4)
+        self.on_failure = LabeledOption(tab, "If translation fails", list(FAILURE_CHOICES.values()),
+                                        FAILURE_CHOICES.get(s.get("translation.on_failure", "raise"), FAILURE_CHOICES["raise"]))
+        self.on_failure.pack(fill="x", pady=4)
+        ctk.CTkButton(tab, text="Save", command=self._save_general).pack(fill="x", pady=(12, 4))
+        ctk.CTkButton(tab, text="Restore default settings", fg_color="gray30", command=self._reset_settings).pack(
+            fill="x", pady=2)
 
     def _save_general(self) -> None:
-        """Persist general settings and rebuild engines."""
+        """Persist general and advanced settings and rebuild the engines."""
         s = self.settings
-        s.set("general.reading_order", self.reading.get())
-        s.set("inpainting.backend", self.inpaint_backend.get())
-        s.set("general.output_format", self.out_format.get())
-        s.set("general.save_project_json", bool(self.save_json.get()))
-        s.set("general.theme", self.theme.get())
+        failure = {v: k for k, v in FAILURE_CHOICES.items()}
+        for key, value in {
+            "general.reading_order": self.reading.get(),
+            "general.output_format": self.out_format.get(),
+            "general.jpg_quality": int(self.jpg_quality.get()),
+            "general.save_project_json": bool(self.save_json.get()),
+            "general.theme": self.theme.get(),
+            "ocr.min_confidence": round(self.ocr_conf.get(), 2),
+            "ocr.workers": 0 if self.ocr_workers.get() == "auto" else int(self.ocr_workers.get()),
+            "detector.mask_dilate": int(self.mask_grow.get()),
+            "translation.retries": int(self.retries.get()),
+            "translation.timeout": int(self.timeout.get()),
+            "translation.on_failure": failure.get(self.on_failure.get(), "raise"),
+        }.items():
+            s.set(key, value)
         s.save()
         self.pipeline.reload_settings(full=True)
-        self.log("General settings saved.")
+        self.log("Settings saved.")
+
+    def _reset_settings(self) -> None:
+        """Back to the defaults (keeps the Gemini keys); the window is rebuilt on the next start."""
+        if not messagebox.askyesno("Restore defaults", "Restore all settings to their defaults?\n"
+                                                       "Your Gemini keys are kept. Restart the app afterwards."):
+            return
+        keys = self.settings.get("translation.gemini_keys", [])
+        fresh = Settings()
+        fresh.set("translation.gemini_keys", keys)
+        fresh.set("general.first_run_done", True)
+        fresh.save()
+        self.settings.data = fresh.data
+        self.log("Defaults restored - restart the app to see them in the controls.")
 
     # ------------------------------------------------------------------
     # Files
@@ -744,16 +899,28 @@ class ComicTranslatorApp(ctk.CTk):
     # ------------------------------------------------------------------
     # Processing
     # ------------------------------------------------------------------
-    def _require_key(self) -> bool:
-        """Make sure at least one Gemini key is set; otherwise guide the user to the right tab."""
+    def _preflight(self, out_dir: Optional[Path] = None) -> bool:
+        """Check keys, eraser, fonts and folders before working; explain problems and where to fix them.
+
+        Args:
+            out_dir: Output folder that must be writable (batch runs only).
+
+        Returns:
+            ``False`` when an error blocks the run (a dialog with a shortcut was shown).
+        """
         self._sync_translation()
-        if parse_keys(self.settings.get("translation.gemini_keys", [])):
+        issues = preflight(self.settings, out_dir)
+        for i in issues:
+            if not i.error:
+                self.log("Warning: " + i.text)
+        errors = [i for i in issues if i.error]
+        if not errors:
             return True
-        self.tabs.set("Translation")
-        messagebox.showinfo(
-            "Gemini key needed | مفتاح Gemini مطلوب",
-            "Paste a free Gemini API key in the Translation tab first.\nPress '🔑 Get a free key' to create one in 1 minute.\n\n"
-            "الصق مفتاح Gemini المجاني في تبويب Translation أولًا.\nاضغط زر 🔑 لإنشاء مفتاح خلال دقيقة.")
+        first = errors[0]
+        if first.tab:
+            self.tabs.set(first.tab)
+        ErrorModal(self, "Fix this first | أصلح هذا أولًا", "\n\n".join(f"✘  {i.text}" for i in errors),
+                   action=(f"Open {first.tab}", lambda: self.tabs.set(first.tab)) if first.tab else ("Open Setup", self.open_setup))
         return False
 
     def _process_current(self) -> None:
@@ -762,7 +929,7 @@ class ComicTranslatorApp(ctk.CTk):
             messagebox.showinfo("No page", "Select an image first.")
             return
         path = self.current
-        if not self._require_key():
+        if not self._preflight():
             return
 
         def work() -> PageResult:
@@ -795,7 +962,7 @@ class ComicTranslatorApp(ctk.CTk):
             messagebox.showinfo("No pages", "Drop images or a folder into the window first.")
             return
         out_dir = self._default_out_dir()
-        if not self._require_key():
+        if not self._preflight(out_dir):
             return
         self.log(f"Results will be saved in: {out_dir}")
 

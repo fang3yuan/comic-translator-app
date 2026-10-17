@@ -61,7 +61,7 @@ def test_lama_if_model_present():
     pytest.importorskip("onnxruntime")
     img = _page()
     mask = Detector.build_mask(img, _regions(img), dilate=3)
-    out = Inpainter("lama", model, flat_fill=False).inpaint(img, mask)
+    out = Inpainter("lama", models={"lama": model}, flat_fill=False).inpaint(img, mask)
     assert out.shape == img.shape
 
 
@@ -112,9 +112,9 @@ def test_migan_backend_plumbing(tmp_path):
     img = np.random.default_rng(0).integers(0, 255, (300, 400, 3), dtype=np.uint8)
     mask = np.zeros((300, 400), np.uint8)
     mask[100:140, 150:260] = 255
-    inp = Inpainter("migan", migan_model=path, flat_fill=False, patch_fill=False, log=lambda m: None)
+    inp = Inpainter("migan", models={"migan": path}, flat_fill=False, patch_fill=False, log=lambda m: None)
     out = inp.inpaint(img, mask)
-    assert inp._session is not None  # the model really ran (no OpenCV fallback)
+    assert inp.active == "migan"  # the model really ran (no OpenCV fallback)
     far = np.ones_like(mask, bool)
     far[60:180, 110:300] = False
     assert np.abs(out[far].astype(int) - img[far].astype(int)).max() == 0  # untouched outside the mask
@@ -138,3 +138,58 @@ def test_flat_bubble_halo_is_wiped_but_outline_survives():
     inside = out[30:180, 30:270]
     assert inside.min() >= 250  # letters and their halo are gone
     assert out[5:8, 100].max() < 60  # the outline was not touched
+
+
+def _gradient_bubble():
+    grad = np.tile(np.linspace(190, 250, 320, dtype=np.float32), (200, 1))
+    clean = np.stack([grad] * 3, -1).astype(np.uint8)
+    img = clean.copy()
+    cv2.putText(img, "HELLO", (60, 110), cv2.FONT_HERSHEY_SIMPLEX, 1.8, (0, 0, 0), 3)
+    mask = (np.abs(img.astype(int) - clean.astype(int)).sum(2) > 0).astype(np.uint8) * 255
+    return clean, img, cv2.dilate(mask, np.ones((5, 5), np.uint8))
+
+
+def test_gradient_paper_gets_a_plane_fill_not_a_flat_patch():
+    clean, img, mask = _gradient_bubble()
+    inp = Inpainter("telea", log=lambda m: None, workers=1)
+    out = inp.inpaint(img, mask)
+    assert inp.last_stats == {"plane": 1}
+    assert np.abs(out.astype(int) - clean.astype(int))[mask > 0].mean() < 2.0  # the gradient continues through
+
+
+def test_plane_fill_can_be_switched_off():
+    _clean, img, mask = _gradient_bubble()
+    inp = Inpainter("telea", flat_fill=False, patch_fill=False, log=lambda m: None, workers=1)
+    inp.inpaint(img, mask)
+    assert "plane" not in inp.last_stats
+
+
+def test_reject_score_flags_busy_or_off_tone_results():
+    from src.core.inpainter import reject_score
+
+    smooth = np.full((120, 160, 3), 220, np.uint8)
+    mask = np.zeros((120, 160), np.uint8)
+    mask[40:80, 50:110] = 255
+    assert reject_score(smooth, smooth, mask, 24) < 1.0
+    noisy = smooth.copy()
+    noisy[40:80, 50:110] = np.random.default_rng(1).integers(0, 255, (40, 60, 3))
+    assert reject_score(noisy, smooth, mask, 24) > 1.0
+    dark = smooth.copy()
+    dark[40:80, 50:110] = 20
+    assert reject_score(dark, smooth, mask, 24) >= 2.0
+
+
+def test_bad_model_output_is_rolled_back_to_opencv():
+    h, w = 260, 520
+    yy, xx = np.mgrid[0:h, 0:w]
+    clean = np.stack([100 + (xx % 14) * 6, 120 + (yy % 10) * 5, 90 + ((xx + yy) % 20) * 4], -1).astype(np.uint8)
+    img = clean.copy()
+    cv2.putText(img, "TEXT", (150, 150), cv2.FONT_HERSHEY_SIMPLEX, 2.4, (255, 255, 255), 6)
+    mask = cv2.dilate((np.abs(img.astype(int) - clean.astype(int)).sum(2) > 0).astype(np.uint8) * 255,
+                      np.ones((5, 5), np.uint8))
+    inp = Inpainter("lama", patch_fill=False, flat_fill=False, log=lambda m: None, workers=1)
+    inp._loaded, inp._session, inp.active = True, object(), "lama"
+    inp._run_model = lambda crop, m: np.zeros_like(crop)  # a network that paints black blobs
+    out = inp.inpaint(img, mask)
+    assert inp.last_stats == {"rollback": 1}
+    assert out[mask > 0].mean() > 60  # not the black result

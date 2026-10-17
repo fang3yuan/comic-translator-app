@@ -116,6 +116,45 @@ class LabeledOption(ctk.CTkFrame):
         self.menu.configure(values=list(values) or [""])
 
 
+class LabeledCombo(ctk.CTkFrame):
+    """Label + editable drop-down (pick from the list or type your own value)."""
+
+    def __init__(self, master: tk.Misc, label: str, values: Sequence[str], value: str = "") -> None:
+        """Create the control.
+
+        Args:
+            master: Parent.
+            label: Caption.
+            values: Suggested choices.
+            value: Initial text.
+        """
+        super().__init__(master, fg_color="transparent")
+        ctk.CTkLabel(self, text=label, anchor="w").pack(fill="x")
+        self.combo = ctk.CTkComboBox(self, values=list(values) or [""])
+        self.combo.pack(fill="x")
+        self.combo.set(value)
+
+    def get(self) -> str:
+        """Current text."""
+        return self.combo.get().strip()
+
+    def set(self, value: str) -> None:
+        """Replace the text."""
+        self.combo.set(value)
+
+    def set_values(self, values: Sequence[str]) -> None:
+        """Replace the suggestions."""
+        self.combo.configure(values=list(values) or [""])
+
+
+def section(master: tk.Misc, text: str, hint: str = "") -> None:
+    """Pack a bold section heading (with an optional grey explanation under it)."""
+    ctk.CTkLabel(master, text=text, anchor="w", font=ctk.CTkFont(size=14, weight="bold")).pack(
+        fill="x", pady=(14, 0))
+    if hint:
+        ctk.CTkLabel(master, text=hint, anchor="w", justify="left", wraplength=330, text_color="gray60").pack(fill="x")
+
+
 class LabeledSlider(ctk.CTkFrame):
     """Label + slider with a live value read-out."""
 
@@ -203,11 +242,19 @@ class LogBox(ctk.CTkTextbox):
         """Create the log box and start polling its queue."""
         super().__init__(master, state="disabled", wrap="word", **kwargs)
         self._q: "queue.Queue[str]" = queue.Queue()
+        self.tag_config("error", foreground="#ff6b6b")
+        self.tag_config("warn", foreground="#d29922")
         self.after(100, self._drain)
 
     def write(self, message: str) -> None:
         """Thread-safe append of a line."""
         self._q.put(message)
+
+    def clear(self) -> None:
+        """Remove all text."""
+        self.configure(state="normal")
+        self.delete("1.0", "end")
+        self.configure(state="disabled")
 
     def _drain(self) -> None:
         """Move queued lines into the widget."""
@@ -219,7 +266,11 @@ class LogBox(ctk.CTkTextbox):
             pass
         if lines:
             self.configure(state="normal")
-            self.insert("end", "\n".join(lines) + "\n")
+            for line in lines:
+                low = line.lower()
+                tag = "error" if low.startswith("error") or "failed" in low or "could not" in low else (
+                    "warn" if low.startswith("warning") or "skipped" in low else "")
+                self.insert("end", line + "\n", tag or None)
             self.see("end")
             self.configure(state="disabled")
         self.after(100, self._drain)

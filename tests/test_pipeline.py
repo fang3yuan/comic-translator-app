@@ -68,3 +68,46 @@ def test_full_page_with_a_fake_gemini():
     assert len(fake.payloads) == 1 and "WHAT ARE YOU" in fake.payloads[0]["items"][0]["text"].upper()
     assert page.regions[0].translation
     assert np.abs(np.array(page.result, int) - np.array(im, int)).sum() > 0  # something was drawn
+
+
+def test_blocks_gemini_skips_stay_in_english_and_are_reported():
+    class Skipping(FakeGoogle):
+        def __call__(self, url, headers=None, data=None, timeout=None):
+            r = super().__call__(url, headers, data, timeout)
+            body = r.json()
+            rows = json.loads(body["candidates"][0]["content"]["parts"][0]["text"])["translations"][:1]
+            r.json = staticmethod(lambda: {"candidates": [{"content": {"parts": [{"text": json.dumps({"translations": rows})}]}}]})
+            return r
+
+    logs = []
+    p = ComicPipeline(Settings({"translation": {"retries": 1}}), logs.append)
+    p._translator = GeminiTranslator("KEY_FOR_TESTS", retries=1, poster=Skipping(), min_interval=0, sleep=lambda s: None)
+    regions = [TextRegion(0, (0, 0, 200, 40), text="Hello there"), TextRegion(1, (0, 50, 200, 90), text="Second line")]
+    p.translate_regions(regions)
+    assert regions[0].translation == "ترجمة تجريبية" and regions[1].translation == "Second line"
+    assert any("skipped 1 block" in m for m in logs)
+
+
+def test_picture_mode_sends_the_page_and_applies_ocr_corrections():
+    class Seeing(FakeGoogle):
+        def __call__(self, url, headers=None, data=None, timeout=None):
+            self.parts = json.loads(data)["contents"][0]["parts"]
+            r = super().__call__(url, headers, data, timeout)
+            rows = [{"id": 0, "text": "ترجمة", "source": "HELLO THERE"}]
+            r.json = staticmethod(lambda: {"candidates": [{"content": {"parts": [{"text": json.dumps({"translations": rows})}]}}]})
+            return r
+
+    fake = Seeing()
+    p = ComicPipeline(Settings({"translation": {"vision": True}}), lambda m: None)
+    p._translator = GeminiTranslator("KEY_FOR_TESTS", poster=fake, min_interval=0, sleep=lambda s: None)
+    regions = [TextRegion(0, (10, 10, 200, 60), text="HELL0 THERE")]
+    p.translate_regions(regions, Image.new("RGB", (300, 200), "white"))
+    assert len(fake.parts) == 2 and "inlineData" in fake.parts[1]
+    assert regions[0].text == "HELLO THERE" and regions[0].translation == "ترجمة"
+
+
+def test_memory_follows_pages_and_reload_keeps_it():
+    p = _pipeline(FakeGoogle())
+    p.memory.update("A story.", {"Luffy": "لوفي"}, [("Hi", "مرحبا")])
+    p.reload_settings()
+    assert p.translator.memory is p.memory and p.memory.glossary == {"Luffy": "لوفي"}

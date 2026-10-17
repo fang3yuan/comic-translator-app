@@ -10,8 +10,9 @@ from pathlib import Path
 from typing import List, Optional, Sequence
 
 from src import __version__
-from src.config import Settings, prepare_user_dirs, resolve_path
+from src.config import Settings, prepare_user_dirs
 from src.translators.gemini import parse_keys
+from src.utils import modelstore
 from src.utils.sysutils import lower_priority
 
 
@@ -35,8 +36,10 @@ def build_parser() -> argparse.ArgumentParser:
     cli.add_argument("--model", help="Gemini model name")
     cli.add_argument("--order", choices=["rtl", "ltr"], help="Reading order")
     cli.add_argument("--format", choices=["png", "jpg", "webp"], help="Output format")
-    cli.add_argument("--inpaint", choices=["auto", "lama", "migan", "telea", "ns"], help="Inpainting backend")
-    cli.add_argument("--download-models", action="store_true", help="Download the LaMa ONNX model and exit")
+    cli.add_argument("--inpaint", choices=["auto", *modelstore.CATALOG, *modelstore.OPENCV_BACKENDS],
+                     help="Eraser (auto = best installed model)")
+    cli.add_argument("--install-model", choices=[k for k, m in modelstore.CATALOG.items() if m.url],
+                     metavar="MODEL", help="Download an eraser model (lama_manga or lama) and exit")
     return parser
 
 
@@ -69,7 +72,6 @@ def run_cli(args: argparse.Namespace) -> int:
     Returns:
         Process exit code.
     """
-    from src.core.inpainter import ensure_lama_model
     from src.core.pipeline import ComicPipeline
     from src.translators import TranslationError
     from src.utils.image_utils import IMAGE_EXTENSIONS, list_images
@@ -77,22 +79,21 @@ def run_cli(args: argparse.Namespace) -> int:
     settings = Settings.load()
     _apply_cli_overrides(settings, args)
 
-    if args.download_models:
-        target = resolve_path(settings.get("inpainting.lama_model", "models/lama_fp32.onnx"))
+    if args.install_model:
         last = {"pct": -1}
 
         def show(frac: float) -> None:
             pct = int(frac * 100)
             if pct != last["pct"] and pct % 5 == 0:
                 last["pct"] = pct
-                print(f"\rDownloading LaMa: {pct}%", end="", flush=True)
+                print(f"\rDownloading: {pct}%", end="", flush=True)
 
         try:
-            path = ensure_lama_model(target, show)
+            path = modelstore.download(args.install_model, show, print)
         except RuntimeError as exc:
             print(f"\n{exc}", file=sys.stderr)
             return 1
-        print(f"\nLaMa model ready at {path}")
+        print(f"\nReady: {path}")
         return 0
 
     files: List[Path] = []

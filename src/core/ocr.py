@@ -276,11 +276,13 @@ class OCREngine:
         return kept
 
     def _filter(self, lines: Sequence[OCRLine]) -> List[OCRLine]:
-        """Remove low-confidence, empty or symbol-only lines."""
+        """Remove low-confidence, empty or symbol-only lines (a lone character needs 0.75: round heads read as "O")."""
         out = []
         for ln in lines:
             x1, y1, x2, y2 = ln.bbox
             if ln.confidence < self.min_confidence or not re.search(r"[A-Za-z0-9]", ln.text):
+                continue
+            if len(ln.text.strip()) == 1 and ln.confidence < max(self.min_confidence, 0.75):
                 continue
             if (y2 - y1) < 6 or (x2 - x1) < 6:
                 continue

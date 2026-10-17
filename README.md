@@ -21,7 +21,7 @@
 | [مفاتيح جمناي](docs/GEMINI.md) | مفتاح مجاني، عدة مفاتيح، الحدود |
 | [دليل الاستخدام](docs/USAGE.md) | الترجمة، التعديل، الخطوط، التصدير |
 | [بناء ملف exe ونشره على GitHub](docs/BUILD.md) | نقرة واحدة للتجميع، Release تلقائي |
-| [محركات المسح](docs/INPAINTING.md) | LaMa وMI-GAN ومقارنتهما |
+| [محركات المسح](docs/INPAINTING.md) | LaMa Manga وLaMa وMI-GAN، التثبيت والاحتياطي |
 | [حل المشاكل](docs/TROUBLESHOOTING.md) | أخطاء المفتاح، البطء، ضغط الجهاز |
 | [أسئلة شائعة](docs/FAQ.md) | LaMa، الخصوصية، سطر الأوامر |
 | [الشرح التقني (EN)](docs/ARCHITECTURE.md) | بنية الكود |

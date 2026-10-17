@@ -190,3 +190,36 @@ def polygon_mask(shape: Tuple[int, int], polygons: Sequence[Sequence[Point]]) ->
         pts = np.array(poly, dtype=np.int32).reshape(-1, 1, 2)
         cv2.fillPoly(mask, [pts], 255)
     return mask
+
+
+def numbered_page_jpeg(image: Image.Image, boxes: dict, max_side: int = 1280, quality: int = 80) -> bytes:
+    """JPEG of the page with a numbered box around every text block (for picture mode).
+
+    Args:
+        image: Page image.
+        boxes: ``{id: (x1, y1, x2, y2)}`` in page pixels.
+        max_side: Longest side of the picture sent (smaller = fewer tokens).
+        quality: JPEG quality.
+
+    Returns:
+        JPEG bytes.
+    """
+    import io
+
+    from PIL import ImageDraw
+
+    scale = min(1.0, max_side / max(image.size))
+    pic = image.convert("RGB")
+    if scale < 1.0:
+        pic = pic.resize((max(1, int(pic.width * scale)), max(1, int(pic.height * scale))), Image.LANCZOS)
+    draw = ImageDraw.Draw(pic)
+    for rid, (x1, y1, x2, y2) in boxes.items():
+        rect = (x1 * scale, y1 * scale, x2 * scale, y2 * scale)
+        draw.rectangle(rect, outline=(255, 0, 0), width=2)
+        label = str(rid)
+        tw = 8 * len(label) + 6
+        draw.rectangle((rect[0], rect[1] - 14, rect[0] + tw, rect[1]), fill=(255, 0, 0))
+        draw.text((rect[0] + 3, rect[1] - 13), label, fill=(255, 255, 255))
+    out = io.BytesIO()
+    pic.save(out, "JPEG", quality=quality)
+    return out.getvalue()

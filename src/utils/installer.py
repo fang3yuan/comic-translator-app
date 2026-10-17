@@ -10,7 +10,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, List, Optional, Sequence
 
-from src.config import FONTS_DIR, Settings, resolve_path
+from src.config import FONTS_DIR, Settings
+from src.utils import modelstore
 
 LogFn = Callable[[str], None]
 ProgressFn = Callable[[float, str], None]
@@ -21,7 +22,7 @@ class Component:
     """One installable/checkable part of the application.
 
     Attributes:
-        key: Stable identifier (``core``, ``ocr``, ``lama``, ...).
+        key: Stable identifier (``core``, ``ocr``, ``model:lama``, ...).
         title: Display name.
         ok: Whether it is ready.
         detail: Status or hint text.
@@ -39,26 +40,27 @@ class Component:
     packages: List[str] = field(default_factory=list)
 
 
-def _has(*modules: str) -> bool:
+def has_modules(*modules: str) -> bool:
     """Whether every module can be found (without importing it)."""
     importlib.invalidate_caches()
     return all(importlib.util.find_spec(m) is not None for m in modules)
+
+
+MODEL_PREFIX = "model:"
 
 
 def check_environment(settings: Optional[Settings] = None) -> List[Component]:
     """Inspect the current environment.
 
     Args:
-        settings: Settings (used for the LaMa model path).
+        settings: Unused (kept so callers can pass the current settings).
 
     Returns:
-        Status of each component, required ones first.
+        Status of each component: the required ones, then drag & drop, fonts and one entry per eraser model.
     """
-    settings = settings or Settings.load()
-    lama = resolve_path(settings.get("inpainting.lama_model", "models/lama_fp32.onnx"))
     fonts = [p for p in FONTS_DIR.glob("*") if p.suffix.lower() in {".ttf", ".otf"}] if FONTS_DIR.exists() else []
-    core_ok = _has("PIL", "numpy", "cv2", "arabic_reshaper", "bidi", "requests", "customtkinter")
-    ocr_ok = _has("rapidocr")
+    core_ok = has_modules("PIL", "numpy", "cv2", "arabic_reshaper", "bidi", "requests", "customtkinter")
+    ocr_ok = has_modules("rapidocr")
     return [
         Component("core", "Core libraries (window, images, Arabic text)", core_ok,
                   "OK" if core_ok else "Missing - press Install", True, "~150 MB",
@@ -67,15 +69,16 @@ def check_environment(settings: Optional[Settings] = None) -> List[Component]:
         Component("ocr", "Text reader (OCR)", ocr_ok,
                   "OK" if ocr_ok else "Missing - press Install", True, "~60 MB",
                   ["onnxruntime", "rapidocr"]),
-        Component("lama", "Smart text eraser (LaMa model)", lama.exists() and lama.stat().st_size > 1_000_000,
-                  "OK" if lama.exists() else "Not downloaded - without it the simple eraser is used",
-                  False, "~200 MB", ["onnxruntime"]),
-        Component("dnd", "Drag & drop support", _has("tkinterdnd2"),
-                  "OK" if _has("tkinterdnd2") else "Missing - restart the app after installing",
+        Component("dnd", "Drag & drop support", has_modules("tkinterdnd2"),
+                  "OK" if has_modules("tkinterdnd2") else "Missing - restart the app after installing",
                   False, "~1 MB", ["tkinterdnd2"]),
         Component("fonts", "Arabic font", bool(fonts),
                   f"{len(fonts)} font(s) in fonts/" if fonts else "No font in fonts/ - add a .ttf file",
                   True, ""),
+        *[Component(MODEL_PREFIX + m.key, m.title, modelstore.is_installed(m.key),
+                    "Installed" if modelstore.is_installed(m.key)
+                    else ("Not installed" if m.url else "Not installed - import the .onnx file"),
+                    False, m.size, ["onnxruntime"]) for m in modelstore.CATALOG.values()],
     ]
 
 
@@ -125,15 +128,12 @@ def install_component(comp: Component, settings: Settings, log: LogFn, progress:
     prog = progress or (lambda f, t: None)
     log(f"== {comp.title} ==")
     ok = True
-    if comp.key == "lama":
-        from src.core.inpainter import ensure_lama_model
-
-        if comp.packages and not _has("onnxruntime"):
+    if comp.key.startswith(MODEL_PREFIX):
+        if comp.packages and not has_modules("onnxruntime"):
             ok = pip_install(comp.packages, log)
         try:
-            ensure_lama_model(resolve_path(settings.get("inpainting.lama_model", "models/lama_fp32.onnx")),
-                              lambda f: prog(f, f"Downloading LaMa... {f:.0%}"))
-            log("LaMa model downloaded.")
+            modelstore.download(comp.key[len(MODEL_PREFIX):], lambda f: prog(f, f"Downloading {comp.title}... {f:.0%}"), log)
+            log(f"{comp.title} installed.")
         except RuntimeError as exc:
             log(str(exc))
             ok = False
@@ -151,24 +151,29 @@ def install_missing(
     log: LogFn,
     progress: Optional[ProgressFn] = None,
     only: Optional[Sequence[str]] = None,
+    model: Optional[str] = None,
 ) -> bool:
-    """Install everything that is missing.
+    """Install what is missing: the required parts, drag & drop and ONE eraser model.
 
     Args:
         settings: Application settings.
         log: Log callback.
         progress: Optional ``(fraction, text)`` callback.
-        only: Restrict to these component keys.
+        only: Install exactly these component keys instead.
+        model: Eraser model key to install with the essentials (``None`` = none).
 
     Returns:
         ``True`` if all attempted components succeeded.
     """
     prog = progress or (lambda f, t: None)
+
     def wanted(c: Component) -> bool:
         if c.ok or c.key == "fonts":
             return False
         if only is not None:
             return c.key in only
+        if c.key.startswith(MODEL_PREFIX):
+            return model is not None and c.key == MODEL_PREFIX + model
         return True
 
     todo = [c for c in check_environment(settings) if wanted(c)]

@@ -14,7 +14,7 @@ from src.translators import (
     diagnose,
     parse_keys,
 )
-from src.translators.gemini import extract_json, parse_translations, suggest_max_chars
+from src.translators.gemini import extract_json, parse_answer, suggest_max_chars
 from src.utils.arabic_utils import contains_arabic, postprocess_translation, shape_arabic
 
 
@@ -79,7 +79,8 @@ def test_extract_json_tolerates_fences_and_prose():
     assert extract_json('Here you go: {"a": [1, 2]} bye') == {"a": [1, 2]}
     with pytest.raises(ValueError):
         extract_json("no json here")
-    assert parse_translations({"translations": [{"id": "3", "text": " مرحبا "}, {"id": 4, "text": ""}, "junk"]}) == {3: "مرحبا"}
+    texts, _, _ = parse_answer({"translations": [{"id": "3", "text": " مرحبا "}, {"id": 4, "text": ""}, "junk"]}, [3, 4])
+    assert texts == {3: "مرحبا"}
 
 
 def test_whole_page_goes_in_one_request_with_length_hints():
@@ -110,8 +111,14 @@ def test_missing_blocks_are_requested_again():
     assert [i["id"] for i in second["items"]] == [1]  # only the missing one
 
 
-def test_gives_up_when_blocks_never_come_back():
+def test_blocks_that_never_come_back_do_not_fail_the_page():
     server = Server(*[ok({0: "واحد"})] * 5)
+    tr = make(server, retries=2)
+    assert tr.translate_items(ITEMS) == {0: "واحد"} and tr.last_missing == [1]
+
+
+def test_nothing_translated_is_an_error():
+    server = Server(*[ok({})] * 5)
     with pytest.raises(TranslationError):
         make(server, retries=2).translate_items(ITEMS)
 
@@ -127,7 +134,7 @@ def test_rate_limited_key_rotates_to_the_next_key():
 
 def test_single_key_waits_for_retry_delay_then_succeeds():
     server = Server(err(429, "quota", {"details": [{"retryDelay": "12s"}]}))
-    tr = make(server)
+    tr = make(server, fallback_models=())
     assert tr.translate_items(ITEMS)[0] == "ar:Hello there"
     assert any(s >= 12 for s in tr.sleeps)
 
@@ -135,8 +142,17 @@ def test_single_key_waits_for_retry_delay_then_succeeds():
 def test_daily_quota_is_reported_instead_of_waiting_for_hours():
     server = Server(err(429, "Quota exceeded for metric ... PerDay"))
     with pytest.raises(TranslationError) as exc:
-        make(server).translate_items(ITEMS)
+        make(server, fallback_models=()).translate_items(ITEMS)
     assert "limit" in str(exc.value).lower()
+
+
+def test_backup_model_takes_over_when_the_main_one_is_out_of_quota():
+    server = Server(err(429, "Quota exceeded ... PerDay"))
+    tr = make(server, model="main-m", fallback_models=("backup-m",))
+    assert tr.translate_items(ITEMS)[0] == "ar:Hello there"
+    assert "main-m" in server.calls[0]["url"] and "backup-m" in server.calls[1]["url"]
+    tr.translate_items(ITEMS)  # the exhausted model is skipped while it cools down
+    assert "backup-m" in server.calls[-1]["url"] and tr.model == "backup-m"
 
 
 def test_invalid_key_is_dropped_and_the_next_one_used():
@@ -240,3 +256,72 @@ def test_postprocess_punctuation_and_digits():
 def test_shape_arabic_changes_text_and_keeps_arabic():
     shaped = shape_arabic("مرحبا")
     assert shaped != "مرحبا" and contains_arabic(shaped) and shaped.count("\n") == 0
+
+
+def test_answer_repair_accepts_plain_lists_and_other_keys():
+    assert parse_answer(["واحد", "اثنان", "زيادة"], [7, 8])[0] == {7: "واحد", 8: "اثنان"}  # extra row ignored
+    assert parse_answer(["واحد"], [7, 8])[0] == {}  # too short: positions would be a guess
+    assert parse_answer({"translations": [{"id": 1, "translation": "نص"}]}, [1])[0] == {1: "نص"}
+
+
+def test_series_memory_travels_with_the_request_and_is_updated():
+    from src.translators import SeriesMemory
+
+    memory = SeriesMemory()
+
+    def answer(body):
+        payload = json.dumps({"translations": [{"id": 0, "text": "مرحبا"}, {"id": 1, "text": "انفجار"}],
+                              "context": {"summary": "Luffy meets Zoro.",
+                                          "glossary": [{"source": "Luffy", "arabic": "لوفي"}]}}, ensure_ascii=False)
+        return Resp(200, {"candidates": [{"content": {"parts": [{"text": payload}]}}]})
+
+    server = Server(answer)
+    tr = make(server, memory=memory)
+    tr.translate_items(ITEMS)
+    first = json.loads(server.calls[0]["body"]["contents"][0]["parts"][0]["text"])
+    assert "series_memory" not in first  # nothing known yet
+    assert memory.summary == "Luffy meets Zoro." and memory.glossary == {"Luffy": "لوفي"}
+    assert [e for e, _a in memory.recent] == ["Hello there", "BOOM"]
+    tr.translate_items(ITEMS)
+    second = json.loads(server.calls[1]["body"]["contents"][0]["parts"][0]["text"])
+    assert second["series_memory"]["glossary"] == {"Luffy": "لوفي"} and len(second["series_memory"]["last_bubbles"]) == 2
+    assert "series_memory" in server.calls[1]["body"]["systemInstruction"]["parts"][0]["text"]
+    tr.translate_items(ITEMS, remember=False)  # a single-block retry leaves the memory alone
+    assert len(memory.recent) == 4 or len(memory.recent) == 5
+
+
+def test_picture_mode_sends_the_image_and_returns_corrected_source():
+    def answer(body):
+        payload = json.dumps({"translations": [{"id": 0, "text": "مرحبا", "source": "Hello there!"},
+                                               {"id": 1, "text": "بوم"}]}, ensure_ascii=False)
+        return Resp(200, {"candidates": [{"content": {"parts": [{"text": payload}]}}]})
+
+    server = Server(answer)
+    tr = make(server)
+    tr.translate_items(ITEMS, image=b"\xff\xd8jpeg")
+    parts = server.calls[0]["body"]["contents"][0]["parts"]
+    assert parts[1]["inlineData"]["mimeType"] == "image/jpeg"
+    assert "source" in server.calls[0]["body"]["systemInstruction"]["parts"][0]["text"]
+    assert tr.last_sources == {0: "Hello there!"}
+
+
+def test_picture_mode_is_dropped_when_the_model_rejects_images():
+    server = Server(err(400, "Image input is not supported by this model"))
+    tr = make(server)
+    tr.translate_items(ITEMS, image=b"jpeg")
+    assert len(server.calls[1]["body"]["contents"][0]["parts"]) == 1 and "vision" in tr._off
+
+
+def test_list_models_keeps_text_generators_only():
+    class Get:
+        def __call__(self, url, headers=None, params=None, timeout=None):
+            rows = [{"name": "models/gemini-2.5-flash", "supportedGenerationMethods": ["generateContent"]},
+                    {"name": "models/gemini-embedding-001", "supportedGenerationMethods": ["embedContent"]},
+                    {"name": "models/gemini-2.5-flash-preview-tts", "supportedGenerationMethods": ["generateContent"]},
+                    {"name": "models/gemma-3", "supportedGenerationMethods": ["generateContent"]}]
+            return type("R", (), {"status_code": 200, "json": staticmethod(lambda: {"models": rows})})()
+
+    tr = GeminiTranslator("KEY1234567890", getter=Get())
+    assert tr.list_models() == ["gemini-2.5-flash"]
+    with pytest.raises(ConfigurationError):
+        GeminiTranslator("", getter=Get()).list_models()
