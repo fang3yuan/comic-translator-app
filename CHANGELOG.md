@@ -1,14 +1,27 @@
 # Changelog
 
-## 2.2.0
-- **Eraser models panel:** pick LaMa Manga / LaMa / MI-GAN / OpenCV with one click; install one model only (download or import a `.onnx`), delete it, choose a backup eraser.
-- **Smarter erasing:** mask thickness fitted to the paper, plane fill with matching grain for gradients, quality check with automatic rollback to the next method.
-- **Gemini:** model picker with backup models and automatic switch when a model's quota ends, series memory (summary, names, last lines), optional page-picture mode that fixes OCR mistakes, self-healing answers (missing blocks keep the English text instead of failing the page).
-- **Interface:** status bar, scrollable tabs, Eraser tab, health check before translating with a "fix it" button, every setting reachable from the UI.
-- Removed dead code and the old per-model settings (migrated automatically).
+Notable project changes are documented here. Entries summarize user-facing changes and do not replace the Git history.
 
-## 2.0.0
-- Translation is Gemini-only: one or several API keys, one request per page, structured JSON answer, max 1 request/second.
-- No bubble detection: the translation goes into the detected text box and grows only into verified empty space.
-- LaMa runs light (limited threads, low priority, optional GPU); OCR trimmed.
-- One-click builds (`build_windows.bat`, `build.sh`) and GitHub Actions that build and publish releases.
+## [2.2.0]
+
+- Added an eraser-model panel for selecting LaMa Manga, LaMa, MI-GAN, or OpenCV.
+- Added model management options, including downloading or importing ONNX models, removing installed models, and selecting a fallback eraser.
+- Improved text-removal processing with mask sizing, background fill handling, quality checks, and fallback behavior.
+- Added Gemini model selection and fallback options when a model reaches its quota.
+- Added series context to help maintain consistency of summaries, names, and recent dialogue.
+- Added an optional page-image translation mode to help address OCR errors.
+- Improved handling of incomplete model responses so missing blocks do not automatically fail the entire page.
+- Improved the interface with a status bar, scrollable tabs, an eraser tab, and a pre-translation health check.
+- Removed obsolete code and migrated older model settings automatically.
+
+## [2.0.0]
+
+- Standardized translation around Google Gemini.
+- Combined detected text blocks into a structured page-level translation request.
+- Improved placement of translated text within detected text regions.
+- Reduced OCR overhead and tuned LaMa execution to limit resource usage.
+- Added one-click build scripts and GitHub Actions release automation.
+
+---
+
+For earlier changes, see the repository's [commit history](https://github.com/fang3yuan/comic-translator-app/commits/main).
