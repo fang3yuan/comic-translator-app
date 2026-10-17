@@ -4,7 +4,7 @@
 
 **AI-assisted comic and manhwa translation · English to Arabic**
 
-Detect text, clean the original lettering, translate with Google Gemini, and render Arabic text back into the image.
+Detect text, remove original lettering while preserving artwork where possible, translate with Google Gemini, and render Arabic text into the image.
 
 [Download](https://github.com/fang3yuan/comic-translator-app/releases/latest) · [Releases](https://github.com/fang3yuan/comic-translator-app/releases) · [Issues](https://github.com/fang3yuan/comic-translator-app/issues) · [الواجهة العربية](https://github.com/fang3yuan/comic-translator-app/blob/main/README.md)
 
@@ -16,105 +16,101 @@ Detect text, clean the original lettering, translate with Google Gemini, and ren
 
 ---
 
+## Before and after
+
+<div align="center">
+
+![Comic translation before and after](docs/images/00-before-after-demo.png)
+
+<sub>Before-and-after example included in the project.</sub>
+
+</div>
+
 ## Overview
 
-**Comic Translator** is a desktop application for translating comic and manhwa pages into Arabic. It helps detect text regions, remove the original lettering while attempting to preserve the artwork, translate the extracted text, and render the Arabic translation back into the image.
-
-The application uses **Google Gemini** for translation and offers multiple text-removal options. Processing time and output quality depend on the source image, selected model, and available hardware.
+**Comic Translator** is a desktop application for translating comic and manhwa pages into Arabic. It reads detected text, removes the original lettering, sends the text to Google Gemini for translation, and renders the Arabic text back into the image.
 
 ## Features
 
-- **AI translation:** Translate detected text with Google Gemini and provide additional context such as character names, tone, and terminology.
-- **Page-level translation request:** Send detected text blocks together in a structured request instead of issuing a separate request for every block.
-- **Text-region rendering:** Place translated text inside detected regions, with expansion when suitable space is available.
-- **Style-aware rendering:** Match the original text color and appearance as closely as possible.
-- **Multiple erasing options:** Choose among available engines such as LaMa Manga, LaMa, MI-GAN, or OpenCV, depending on installed models and configuration.
-- **Gemini key management:** Configure one or multiple API keys and use fallback model options where supported by the current configuration.
-- **Series context:** Tools intended to improve consistency of names and dialogue across pages, depending on the current settings.
-- **GUI and CLI:** Use the graphical interface or run translation tasks from the command line.
-- **Windows packaging:** The repository includes build and installation scripts. A ready-to-run installer is available only when attached to a published release.
+- **Gemini translation:** Translate detected text with additional instructions such as character names, tone, and terminology.
+- **Structured page translation:** Process detected text blocks in a structured translation request.
+- **Text-region rendering:** Place translated text in detected regions while accounting for available space.
+- **Text color matching:** Attempt to preserve the original text color when rendering translations.
+- **Text-removal engines:** Choose from available options, including LaMa Manga, LaMa, and MI-GAN, depending on installed models and configuration.
+- **Gemini key settings:** Configure API keys using the options available in the app.
+- **GUI and CLI:** Use the graphical interface or command-line interface.
+- **Windows packaging:** Build and installation files are included in the repository; check Releases for currently available assets.
 
 ## Quick start
 
-### Option 1: Download a release
+### Download a release
 
 1. Open the [latest release page](https://github.com/fang3yuan/comic-translator-app/releases/latest).
-2. Download the installer if an installer asset is attached to that release.
-3. Run it and follow the setup instructions.
+2. Download the installer if one is attached to the release.
+3. Run the installer and follow its instructions.
 
-> A GitHub Release page does not guarantee that a Windows installer is attached. If no installer is available, use the source setup instructions or check back later.
+### Install from repository files
 
-### Option 2: Use the installation script
+Download the repository using **Code → Download ZIP** on the [project page](https://github.com/fang3yuan/comic-translator-app). If `Install.bat` is included in the downloaded version, run it on Windows and follow its prompts.
 
-Download the project using **Code → Download ZIP** on the [repository page](https://github.com/fang3yuan/comic-translator-app), then run `Install.bat` on Windows if it is included in your downloaded version. Follow the script's prompts and only run files you trust.
+### Run from source
 
-### Option 3: Run from source
+See the [installation and build guide](https://github.com/fang3yuan/comic-translator-app/blob/main/docs/INSTALL.md) for instructions matching the current version.
 
-Requirements and setup steps may vary by release and operating system. With a suitable Python environment, install the dependencies and launch the app:
+## Application interface
 
-```bash
-pip install -r requirements.txt
-python run.py
-```
+<div align="center">
 
-To inspect the available CLI options:
+![Comic Translator main window](docs/images/01-main-window.png)
+
+<sub>The main Comic Translator interface.</sub>
+
+</div>
+
+## Workflow
+
+1. **Add pages:** Drag image files into the application.
+2. **Detect and read text:** Identify text regions and extract their contents.
+3. **Remove original lettering:** Process text regions with the selected erasing engine.
+4. **Translate:** Send the text to Gemini with your instructions.
+5. **Render:** Place the Arabic translation into the text regions.
+6. **Save:** Review the output images in the application's output location.
+
+## Guides
+
+| Guide | Contents |
+|---|---|
+| [Installation and build](docs/INSTALL.md) | Source setup and installation files |
+| [Gemini keys](docs/GEMINI.md) | Key configuration and usage limits |
+| [User guide](docs/USAGE.md) | Translation, editing, fonts, and export |
+| [Build EXE](docs/BUILD.md) | Packaging and releases |
+| [Inpainting engines](docs/INPAINTING.md) | Available engines and models |
+| [Troubleshooting](docs/TROUBLESHOOTING.md) | Errors and performance issues |
+| [FAQ](docs/FAQ.md) | Frequently asked questions |
+| [Architecture](docs/ARCHITECTURE.md) | Technical project structure |
+
+## Command line
 
 ```bash
 python run.py cli --help
 ```
 
-These commands are for running from source. For dependency or model issues, check the [repository](https://github.com/fang3yuan/comic-translator-app) and [open issues](https://github.com/fang3yuan/comic-translator-app/issues).
-
-## Google Gemini setup
-
-A valid API key is required for Gemini translation.
-
-1. Create a key in [Google AI Studio](https://aistudio.google.com/apikey).
-2. Enter it in the application's translation section.
-3. Use the key-test option if it is available in your version.
-4. Review Google's current quotas and terms before translating large batches.
-
-**Keep API keys private.** Never commit personal keys to GitHub or include them in screenshots or shared configuration files.
-
-## Workflow
-
-```text
-Comic page
-    ↓
-Text-region detection and OCR
-    ↓
-Remove original lettering with the selected erasing engine
-    ↓
-Translate extracted text with Gemini
-    ↓
-Render Arabic text into the image
-    ↓
-Save the translated result
-```
-
-Some pages may require manual review. Small text, decorative lettering, and complex backgrounds can affect detection, inpainting, and translation quality.
+Use the CLI help or the [user guide](docs/USAGE.md) for the options supported by your version.
 
 ## Performance and privacy
 
-- Text removal can take longer on low-memory computers, particularly when local models are used.
-- Gemini translation requires an internet connection and sends the data needed for translation to Google's service.
-- Do not submit private or sensitive pages to third-party services unless you understand their privacy policies and terms.
-- Image cleanup is not guaranteed to be perfect. Review the output before sharing or publishing it.
+- Text removal can take longer on low-memory computers, particularly with local models.
+- Gemini translation requires an internet connection and sends the text needed for translation to the service.
+- Never commit API keys or include them in screenshots.
+- Review the output manually; decorative lettering and complex backgrounds can affect OCR, cleanup, and translation quality.
 
-## Troubleshooting
+## Reporting issues
 
-- **Translation fails:** Check the API key, internet connection, and Gemini usage limits.
-- **Text removal is slow:** Try a lighter available erasing engine, close other applications, or reduce image dimensions.
-- **Text is missed or translated incorrectly:** Try a clearer image and review the detected regions and final output.
-- **Installation or startup fails:** Include your operating system, installation method, reproduction steps, and error message when [opening an issue](https://github.com/fang3yuan/comic-translator-app/issues).
-
-## Contributing
-
-Bug reports and contributions are welcome. Do not include API keys, credentials, or personal data in issues.
+Open an [issue](https://github.com/fang3yuan/comic-translator-app/issues) and include your operating system, launch method, reproduction steps, and error message. Do not include API keys or sensitive information.
 
 ## License
 
-The project is distributed under the MIT License. See the repository's [LICENSE file](https://github.com/fang3yuan/comic-translator-app/blob/main/LICENSE).
+Licensed under MIT. See the repository's [LICENSE](https://github.com/fang3yuan/comic-translator-app/blob/main/LICENSE).
 
 ---
 
